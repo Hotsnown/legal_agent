@@ -2,11 +2,12 @@ import os
 import uuid
 import time
 import asyncio
+import csv
 from datetime import datetime
 from enum import Enum, auto
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
-# Importation des Modules précédents
+# Importation des Modules
 from system_state import (
     SystemState,
     Task,
@@ -15,10 +16,14 @@ from system_state import (
     RuleType,
     ExtendedCommercialRelationship,
     FinancialHistory,
+    GraphNode,
+    NodeType,
+    WorldTag,
+    EdgeType
 )
-from regex_engine import RegexPerceptionEngine # Module 2 (Version Mock)
-from reasoning_engine import ReasoningEngine   # Module 3
-from active_learning_engine import AcquisitionEngine # Module 4
+from regex_engine import RegexPerceptionEngine
+from reasoning_engine import ReasoningEngine
+from active_learning_engine import AcquisitionEngine
 from domain_config import get_static_rules, get_domain_version
 
 # ==============================================================================
@@ -26,26 +31,26 @@ from domain_config import get_static_rules, get_domain_version
 # ==============================================================================
 
 class WorkflowState(Enum):
-    INIT = auto()        # Chargement
-    PLANNING = auto()    # LLM décide quoi faire
-    EXECUTING = auto()   # Perception ou Calcul
-    EVALUATING = auto()  # Check Entropie & Stop Conditions
-    INTERACTING = auto() # Attente Humaine
-    VERDICT = auto()     # Fin
+    INIT = auto()
+    PLANNING = auto()
+    EXECUTING = auto()
+    EVALUATING = auto()
+    INTERACTING = auto()
+    VERDICT = auto()
 
 class OrchestratorSignal(Enum):
-    CONTINUE = auto() # Passer à l'étape suivante immédiate
-    WAIT = auto()     # Suspendre (ex: attente user)
-    STOP = auto()     # Fin du process
+    CONTINUE = auto()
+    WAIT = auto()
+    STOP = auto()
 
 # ==============================================================================
-# L'ORCHESTRATEUR (THE BOSS)
+# L'ORCHESTRATEUR (THE BOSS) - V2 "ARCHITECTE"
 # ==============================================================================
 
 class LegalOrchestrator:
     """
     Le Système Nerveux Central.
-    Gère les transitions d'états, la persistance et les appels aux sous-modules.
+    Version 2.1 : Intègre la persistance d'état pour la démo.
     """
     
     def __init__(self, case_id: str, data_dir: str = "data"):
@@ -53,22 +58,13 @@ class LegalOrchestrator:
         self.state_machine_status = WorkflowState.INIT
         self.data_dir = data_dir
         self.event_queue: asyncio.Queue = asyncio.Queue()
-        self._stream_task: Optional[asyncio.Task] = None
-        # --- Initialisation des Organes ---
         self.system_state = SystemState(case_id=case_id)
+        
+        # Simulation des moteurs pour l'architecture
         self.perception = RegexPerceptionEngine(emit_event=self._publish_event)
         self.reasoner = ReasoningEngine(emit_event=self._publish_event)
         self.acquirer = AcquisitionEngine(self.reasoner)
-        self._data_loaded = False
         self.system_state.domain_version = get_domain_version()
-        self._hydrate_static_rules()
-        # --- Securite (Watchdogs) ---
-        self.step_counter = 0
-        self.MAX_STEPS = 20
-        self.history_hashes = set()
-        self._needs_replan = False
-        self._replan_reason: Optional[str] = None
-        self.replan_attempts = 0
 
     def _publish_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         event = {
@@ -82,216 +78,263 @@ class LegalOrchestrator:
             pass
         return event
 
-    def _transition(self, new_state: WorkflowState, msg: str) -> Dict:
-        print(f"   >>> Transitioning to {new_state.name} ({msg})")
-        self.state_machine_status = new_state
-        # Ici : Sauvegarde DB (Checkpointing)
-        return {"status": "RUNNING", "state": new_state.name, "description": msg}
-
     def _get_pending_question(self):
         return getattr(self, 'pending_question', "Question générique ?")
 
-    def _hydrate_static_rules(self):
-        static_rules = get_static_rules()
-        if not static_rules:
-            return
-        existing_ids = {rule.rule_id for rule in self.system_state.rules_registry}
-        for cfg in static_rules:
-            if cfg.get("rule_id") in existing_ids:
-                continue
-            rule = Rule(
-                rule_id=cfg.get("rule_id", f"STATIC_{len(existing_ids)}"),
-                type=RuleType.STATIC,
-                description=cfg.get("description", ""),
-                logic_payload=cfg.get("logic_payload"),
-            )
-            self.system_state.rules_registry.append(rule)
-            existing_ids.add(rule.rule_id)
-
-    # --- Legacy compatibility (used by /step endpoint) ---
     def _legacy_run_step(self, user_input: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        Legacy step runner placeholder to keep existing endpoints alive.
-        Streaming demo does not execute state-machine logic; this stub signals unavailability.
-        """
         return {"status": "STREAM_MODE_ONLY", "state": self.state_machine_status.name}
 
+    # --- HELPERS DE PERSISTANCE (FIX POUR LE GRAPHE) ---
+
+    def _persist_node(self, payload: Dict[str, Any]):
+        """Enregistre le nœud dans le SystemState pour qu'il soit visible au refresh."""
+        try:
+            node_id = payload.get("id")
+            if not node_id: return
+            
+            # Création propre du GraphNode
+            node = GraphNode(
+                node_id=node_id,
+                label=payload.get("label", "Sans titre"),
+                type=NodeType(payload.get("type", "FACT")),
+                world_tag=WorldTag(payload.get("world_tag", "SHARED")),
+                probability_score=payload.get("probability", 0.5),
+                content=payload.get("content", {}), # Contenu générique
+                description=payload.get("description", ""),
+                grounding=payload.get("grounding", None)
+            )
+            self.system_state.graph.add_node(node)
+        except Exception as e:
+            print(f"[WARN] Failed to persist node {payload.get('id')}: {e}")
+
+    def _persist_edge(self, payload: Dict[str, Any]):
+        """Enregistre le lien dans le SystemState."""
+        try:
+            self.system_state.graph.add_edge(
+                source=payload["source"],
+                target=payload["target"],
+                type=EdgeType(payload["type"])
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to persist edge: {e}")
+
     # ==================================================================
-    # MODE STREAMING DEMO (100 MICRO-EVENEMENTS)
+    # MODE STREAMING DEMO V2 (SCÉNARIO RICHE + PERSISTANCE)
     # ==================================================================
 
     async def stream_analysis(self, user_input: Optional[Dict] = None):
         """
-        Démo SSE : séquence linéaire (~100 micro-évènements) pour saturer l'UI.
-        Aucun appel aux moteurs réels, tout est scénarisé pour la narration.
+        Scénario V2 : Relation établie -> Rupture Partielle -> Pesée Alexy -> Verdict.
+        Exécute la logique ET persiste les données.
         """
-        domain_version = self.system_state.domain_version or get_domain_version()
+        
+        def evt(event_type: str, payload: Optional[Dict[str, Any]] = None, delay: float = 0.1):
+            # 1. Persistance immédiate (Side Effect)
+            if event_type == "NODE_ADDED":
+                self._persist_node(payload)
+            elif event_type == "EDGE_ADDED":
+                self._persist_edge(payload)
+            elif event_type == "PROBABILITY_UPDATE":
+                self.system_state.entropy = 1.0 - payload.get("probability", 0.5)
 
-        def evt(event_type: str, payload: Optional[Dict[str, Any]] = None, delay: float = 0.08):
+            # 2. Construction de l'événement SSE
             event = {"type": event_type, "payload": payload or {}, "delay": delay}
             event["payload"].setdefault("case_id", self.case_id)
             return event
 
-        data_files = []
-        if os.path.isdir(self.data_dir):
-            data_files = [f for f in sorted(os.listdir(self.data_dir)) if os.path.isfile(os.path.join(self.data_dir, f))]
-        if not data_files:
-            data_files = [
-                "Kbis_RBoutin.pdf",
-                "Kbis_TI.pdf",
-                "Historique_CA_HT_1987_2012.csv",
-                "Facture_RB-2009-0315.pdf",
-                "Attestation_Mme_Vivion.docx",
-                "Email_Franco_2008.msg",
-            ]
-
-        actor_boutin = {"id": "actor_boutin", "label": "R. BOUTIN S.A", "type": "ACTOR", "world_tag": "SHARED", "probability": 0.98}
-        actor_ti = {"id": "actor_ti", "label": "TÔLERIE INDUSTRIELLE", "type": "ACTOR", "world_tag": "SHARED", "probability": 0.98}
-        rupture_node = {"id": "reason_rupture", "label": "Rupture commerciale", "type": "EVENT", "world_tag": "SHARED", "probability": 0.6}
-        impayes_node_id = "impayes_repetes"
-
-        financial_points = [
-            ("1999", 1.2), ("2002", 2.4), ("2004", 2.9), ("2006", 3.1), ("2008", 3.2),
-            ("2009", 3.0), ("2010", 3.4), ("2011", 3.6), ("2012", 3.8), ("2013", 4.0),
+        # Données échantillon
+        financial_history_snippet = [
+            {"year": 1987, "amount": 0.64},
+            {"year": 1995, "amount": 1.58},
+            {"year": 2000, "amount": 2.11},
+            {"year": 2005, "amount": 2.83},
+            {"year": 2008, "amount": 3.22},
+            {"year": 2011, "amount": 2.71},
+            {"year": 2012, "amount": 2.26}
         ]
 
-        email_files = [
-            "email_2008-05-29_franco.msg",
-            "email_2009-03-12_relance.msg",
-            "email_2010-07-02_conditions.doc",
-            "email_2011-01-15_impayes.msg",
-            "email_2011-03-22_reconduction.pdf",
-            "email_2011-06-12_tolerance.msg",
-            "email_2011-07-01_suspension.msg",
-            "email_2011-07-15_compte_rendu.msg",
-            "email_2011-08-05_escalade.msg",
-            "email_2011-08-20_relance_finance.msg",
-            "email_2011-09-01_avocat.msg",
-            "email_2011-09-12_estoppel.msg",
-            "email_2011-10-04_negociation.msg",
-            "email_2011-11-19_rupture.msg",
-            "email_2011-12-24_preavis.msg",
-        ]
+        # --- DÉBUT DU FLUX ---
 
-        events = []
+        yield evt("LOG", {"message": "Démarrage de l'analyseur L.442-1 II (Rupture Brutale)..."}, 0.05)
+        yield evt("LOG", {"message": "Chargement du contexte : 27 documents indexés."}, 0.05)
 
-        # ACTE 1 - Boot & Ingestion
-        events += [
-            evt("LOG", {"message": f"Initialisation du moteur Neuro-Symbolique v{domain_version}..."}, 0.05),
-            evt("LOG", {"message": "Chargement de l'ontologie juridique (L.442-1 II)...", "phase": "BOOT"}, 0.05),
-            evt("LOG", {"message": "Compilation des règles statiques (Rome I, L.442-1 II)...", "phase": "BOOT"}, 0.06),
-            evt("PROBABILITY_UPDATE", {"probability": 0.0, "note": "Démarrage, entropie maximale"}, 0.04),
-            evt("PROBABILITY_UPDATE", {"probability": 0.5, "note": "Calibration initiale"}, 0.04),
-        ]
+        # ---------------------------------------------------------
+        # ACTE 1 : LE SOCLE (RELATION ÉTABLIE)
+        # ---------------------------------------------------------
+        yield evt("LOG", {"message": "PHASE 1 : Qualification de la Relation Commerciale...", "phase": "QUALIFICATION"}, 0.1)
+        
+        yield evt("LOG", {"message": "Ingestion : Historique_CA_HT_1987_2012.csv"}, 0.1)
+        for pt in financial_history_snippet:
+            yield evt("NODE_ADDED", {
+                "id": f"ca_{pt['year']}", 
+                "label": f"CA {pt['year']} : {pt['amount']} M€", 
+                "type": "FACT", 
+                "world_tag": "SHARED",
+                "probability": 1.0
+            }, 0.03)
+        
+        yield evt("PROBABILITY_UPDATE", {"probability": 0.2, "note": "Flux financiers détectés"}, 0.1)
+        
+        yield evt("LOG", {"message": "Analyse temporelle : Relation continue de 1987 à 2012 (25 ans)."}, 0.1)
+        yield evt("NODE_ADDED", {
+            "id": "relation_etablie", 
+            "label": "Relation Commerciale Établie (>20 ans)", 
+            "type": "CONCEPT", 
+            "world_tag": "SHARED",
+            "probability": 0.95,
+            "description": "Flux ininterrompus et croissants."
+        }, 0.1)
+        
+        # Création des liens temporels pour structurer le graphe
+        for pt in financial_history_snippet:
+             yield evt("EDGE_ADDED", {"source": f"ca_{pt['year']}", "target": "relation_etablie", "type": "PROVES"}, 0.02)
 
-        for f in data_files:
-            events.append(evt("LOG", {"message": f"Reading file: {f}"}, 0.05))
-        events.append(evt("NODE_ADDED", actor_boutin, 0.06))
-        events.append(evt("NODE_ADDED", actor_ti, 0.06))
-        events.append(evt("EDGE_ADDED", {"source": actor_boutin["id"], "target": actor_ti["id"], "type": "RELATED"}, 0.06))
-        events.append(evt("NODE_ADDED", rupture_node, 0.05))
+        yield evt("LOG", {"message": "Lecture : Attestation_Mme_VIVION_2012-01-31.docx"}, 0.1)
+        yield evt("NODE_ADDED", {
+            "id": "attest_vivion", 
+            "label": "Preuve : Commandes régulières 2007-2011", 
+            "type": "EVIDENCE", 
+            "world_tag": "SHARED", 
+            "probability": 0.9
+        }, 0.1)
+        yield evt("EDGE_ADDED", {"source": "attest_vivion", "target": "relation_etablie", "type": "PROVES"}, 0.1)
+        
+        yield evt("PROBABILITY_UPDATE", {"probability": 0.98, "note": "Socle juridique confirmé (L.442-1 II)"}, 0.1)
 
-        for i in range(6):
-            events.append(evt("LOG", {"message": f"Indexation vecteur n°{i+1}..."}, 0.04))
+        # ---------------------------------------------------------
+        # ACTE 2 : L'USAGE (LE FRANCO)
+        # ---------------------------------------------------------
+        yield evt("LOG", {"message": "PHASE 2 : Audit des Conditions Contractuelles...", "phase": "CONTRACT"}, 0.1)
+        
+        yield evt("LOG", {"message": "Scan : Email_2008-05-29_franco_de_port.docx"}, 0.1)
+        yield evt("NODE_ADDED", {
+            "id": "cond_franco_2008", 
+            "label": "Accord : Franco de port (Mai 2008)", 
+            "type": "FACT", 
+            "world_tag": "SHARED", 
+            "probability": 0.99,
+            "grounding": {"source_doc_id": "Email_2008.docx", "page_number": 1, "text_span": "Franco dès 1 € net HT... tacitement reconduites"}
+        }, 0.1)
 
-        events.append(evt("LOG", {"message": "Lecture: Historique_CA_HT_1987_2012.csv"}, 0.08))
-        for year, amount in financial_points:
-            events.append(evt("NODE_ADDED", {"id": f"ca_{year}", "label": f"CA {year}: {amount} M€", "type": "FACT", "world_tag": "SHARED", "probability": 0.92}, 0.03))
-        for year, _ in financial_points:
-            events.append(evt("EDGE_ADDED", {"source": f"ca_{year}", "target": actor_boutin["id"], "type": "RELATED"}, 0.03))
-        events.append(evt("LOG", {"message": "Détection d'une relation commerciale établie (>20 ans)."}, 0.12))
-        events.append(evt("PROBABILITY_UPDATE", {"probability": 0.95, "note": "Relation établie consolidée"}, 0.12))
+        yield evt("LOG", {"message": "Vérification de l'exécution (Usage)..."}, 0.1)
+        yield evt("LOG", {"message": "Scan : Facture_RB-2010-0709.docx"}, 0.05)
+        yield evt("NODE_ADDED", {
+            "id": "facture_2010", 
+            "label": "Facture 2010 : Mention 'Franco maintenu'", 
+            "type": "EVIDENCE", 
+            "world_tag": "SHARED", 
+            "probability": 1.0
+        }, 0.1)
+        yield evt("EDGE_ADDED", {"source": "facture_2010", "target": "cond_franco_2008", "type": "CONFIRMS"}, 0.1)
+        
+        yield evt("LOG", {"message": "Qualification Juridique : Le Franco est un avantage acquis (Usage)."}, 0.1)
 
-        # ACTE 2 - Clause NY faux positif
-        events.append(evt("LOG", {"message": "Analyse des clauses contractuelles..."}, 0.1))
-        events.append(evt("NODE_ADDED", {"id": "clause_ny", "label": "Clause Compétence : New York", "type": "FACT", "world_tag": "SHARED", "probability": 0.6}, 0.1))
-        events.append(evt("ALERT", {"level": "HIGH", "message": "DEFEATER DETECTED: Juridiction Hors-UE potentielle.", "target": "clause_ny"}, 0.1))
-        events.append(evt("LOG", {"message": "Vérification de l'applicabilité (Règlement Rome I)...", "phase": "CHECK"}, 1.5))
-        events.append(evt("PROBABILITY_UPDATE", {"probability": 0.05, "note": "Clause NY rejetée"}, 0.08))
-        events.append(evt("LOG", {"message": "Clause écartée : Inapplicable aux délits civils."}, 0.08))
+        # ---------------------------------------------------------
+        # ACTE 3 : LA RUPTURE PARTIELLE (LE BASCULEMENT)
+        # ---------------------------------------------------------
+        yield evt("LOG", {"message": "PHASE 3 : Détection d'Anomalies (Rupture)...", "phase": "SCAN"}, 0.1)
+        
+        yield evt("LOG", {"message": "Comparaison : Commande_1947_TFVM_comparatif_prix.docx"}, 0.1)
+        yield evt("ALERT", {
+            "level": "MEDIUM", 
+            "message": "DÉTÉRIORATION DÉTECTÉE : Perte du Franco & Hausse Tarifs", 
+            "target": "cond_franco_2008"
+        }, 0.1)
+        
+        yield evt("NODE_ADDED", {
+            "id": "modif_unilaterale", 
+            "label": "Modification Unilatérale Substantielle", 
+            "type": "EVENT", 
+            "world_tag": "NARRATIVE_A", 
+            "probability": 0.85,
+            "description": "Suppression brutale de l'avantage logistique acquis."
+        }, 0.1)
+        
+        yield evt("EDGE_ADDED", {"source": "modif_unilaterale", "target": "relation_etablie", "type": "BREAKS"}, 0.1)
+        yield evt("LOG", {"message": "Application Règle : Modification substantielle imposée = RUPTURE PARTIELLE."}, 0.1)
+        
+        # Fausse piste défense (Impayés) évacuée rapidement
+        yield evt("LOG", {"message": "Contrôle narratif défense (Impayés évoqués)..."}, 0.1)
+        yield evt("LOG", {"message": "Rejeté : Tolérance établie par courriers antérieurs (Estoppel)."}, 0.1)
 
-        # ACTE 2 - Attaque
-        events.append(evt("LOG", {"message": "Analyse des pièces de la défense (Mme Vivion)..."} ,0.12))
-        events.append(evt("NARRATIVE_UPDATE", {"message": "Activation Multiverse : Monde B (Défense)"}, 0.08))
-        events.append(evt("NODE_ADDED", {"id": impayes_node_id, "label": "Allégation : Impayés Répétés", "type": "FACT", "world_tag": "NARRATIVE_B", "probability": 0.62}, 0.1))
-        events.append(evt("NODE_ADDED", {"id": "suspension_livraisons", "label": "Suspension des livraisons", "type": "EVENT", "world_tag": "NARRATIVE_B", "probability": 0.55}, 0.1))
-        events.append(evt("EDGE_ADDED", {"source": impayes_node_id, "target": rupture_node["id"], "type": "CAUSES"}, 0.1))
-        events.append(evt("PROBABILITY_UPDATE", {"probability": 0.45, "note": "Risque Faute Grave détecté"}, 0.12))
-        events.append(evt("LOG", {"message": "Scénario de Faute Grave détecté. Risque de rejet de la demande."}, 0.14))
+        # ---------------------------------------------------------
+        # ACTE 4 : LA PESÉE (ALEXY)
+        # ---------------------------------------------------------
+        yield evt("LOG", {"message": "PHASE 4 : Calcul du Préavis Raisonnable (Moteur Alexy)...", "phase": "REASONING"}, 0.2)
+        
+        final_notice = 24
+        
+        yield evt("WEIGHT_UPDATE", {
+            "factor": "Ancienneté (25 ans)", 
+            "impact": "+18 mois", 
+            "type": "BASE"
+        }, 0.1)
+        
+        yield evt("LOG", {"message": "Détection Facteur Aggravant : Courrier_RBOUTIN_TI_2000..."}, 0.1)
+        yield evt("WEIGHT_UPDATE", {
+            "factor": "Exclusivité de fait (Non-prospection)", 
+            "impact": "+4 mois", 
+            "type": "AGGRAVATING"
+        }, 0.1)
+        
+        yield evt("LOG", {"message": "Détection Facteur Aggravant : Dépendance Économique > 20%."}, 0.1)
+        yield evt("WEIGHT_UPDATE", {
+            "factor": "Dépendance Économique / Rupture Partielle", 
+            "impact": "+2 mois", 
+            "type": "AGGRAVATING"
+        }, 0.1)
+        
+        yield evt("NODE_ADDED", {
+            "id": "preavis_alexy", 
+            "label": f"Préavis Raisonnable Calculé : {final_notice} mois", 
+            "type": "RULE_APP", 
+            "world_tag": "SHARED", 
+            "probability": 0.95
+        }, 0.1)
+        yield evt("EDGE_ADDED", {"source": "relation_etablie", "target": "preavis_alexy", "type": "INTERPRETS"}, 0.1)
+        
+        yield evt("LOG", {"message": f"Préavis retenu : {final_notice} mois (vs 0 mois accordé)."}, 0.1)
 
-        # ACTE 3 - Recherche active
-        events.append(evt("LOG", {"message": "Incohérence détectée. Recherche de preuves contradictoires..."}, 0.12))
-        events.append(evt("LOG", {"message": "Scan profond des emails (2008-2011)...", "phase": "SCAN"}, 0.12))
-        for email in email_files:
-            events.append(evt("LOG", {"message": f"Parsing: {email}"}, 0.05))
-        for i in range(5):
-            events.append(evt("PROBABILITY_UPDATE", {"probability": 0.45 + i * 0.02, "note": "Oscillation pendant la fouille"}, 0.06))
+        # ---------------------------------------------------------
+        # ACTE 5 : LE VERDICT (QUANTIFICATION)
+        # ---------------------------------------------------------
+        yield evt("LOG", {"message": "PHASE 5 : Liquidation du Préjudice...", "phase": "DAMAGES"}, 0.1)
+        
+        yield evt("LOG", {"message": "Lecture Taux Marge : Attestation_EC_BOUTIN...docx"}, 0.1)
+        margin_rate = 0.65
+        avg_monthly_ca = 240000 # Approx du CSV (~2.9M / 12)
+        total_damages = avg_monthly_ca * final_notice * margin_rate # ~3.7M
+        
+        yield evt("NODE_ADDED", {
+            "id": "marge_brute", 
+            "label": f"Taux Marge Certifié : {int(margin_rate*100)}%", 
+            "type": "FACT", 
+            "world_tag": "SHARED", 
+            "probability": 1.0
+        }, 0.1)
 
-        # Smoking Gun
-        events.append(evt("NODE_ADDED", {"id": "email_tolerance", "label": "Email : Pas de souci pour le délai", "type": "EVIDENCE", "world_tag": "SHARED", "probability": 0.99}, 0.12))
-        events.append(evt("LOG", {"message": "Analyse sémantique : Tolérance financière explicite."}, 0.12))
-        events.append(evt("EDGE_ADDED", {"source": "email_tolerance", "target": impayes_node_id, "type": "CONTRADICTS"}, 0.1))
-        events.append(evt("NARRATIVE_COLLAPSE", {"collapsed_id": impayes_node_id, "rescued_by": "email_tolerance", "message": "Preuve de tolérance neutralise la faute grave"}, 0.12))
-        events.append(evt("LOG", {"message": "Narratif Défenseur invalidé (Principe de l'Estoppel)."}, 0.12))
-
-        # Verdict buildup
-        prob_track = [0.50, 0.65, 0.80, 0.88, 0.92]
-        for p in prob_track:
-            events.append(evt("PROBABILITY_UPDATE", {"probability": p, "note": "Raffinement du verdict"}, 0.15))
-        events.append(evt("LOG", {"message": "Calcul du préjudice (Méthode Marge sur Coûts Variables)...", "phase": "DAMAGES"}, 0.12))
-        events.append(evt("NODE_ADDED", {"id": "prejudice_estime", "label": "Préjudice Estimé : 1.8 M€", "type": "CONCEPT", "world_tag": "SHARED", "probability": 0.9}, 0.1))
-
+        yield evt("LOG", {"message": "Formule : (Moyenne CA) x (Delta Préavis) x (Taux Marge)"}, 0.1)
+        
         verdict_payload = {
-            "decision": "RUPTURE BRUTALE ÉTABLIE",
-            "confidence_score": 0.92,
-            "explanation": "Relation de 22 ans rompue avec brutalité. L'argument de faute grave est contredit par la preuve de tolérance factuelle (Email 12/06/2011).",
+            "decision": "RUPTURE BRUTALE (TOTALE + PARTIELLE)",
+            "confidence_score": 0.96,
+            "explanation": (
+                f"La suppression du Franco constituait une rupture partielle. "
+                f"La rupture finale sans préavis est brutale. "
+                f"Compte tenu de l'exclusivité et de la durée (25 ans), un préavis de {final_notice} mois était dû."
+            ),
+            "damages": f"{total_damages:,.0f} €".replace(",", " "),
             "case_id": self.case_id,
         }
-        events.append(evt("VERDICT", verdict_payload, 0.0))
-
-        # Padding to ~100 events avec des heartbeats si besoin
-        while len(events) < 100:
-            idx = len(events) + 1
-            events.append(evt("LOG", {"message": f"Heartbeat #{idx}"}, 0.05))
-
-        for event in events:
-            yield event
-            await asyncio.sleep(event.get("delay", 0.1))
-# ==============================================================================
-# SCÉNARIO DE TEST COMPLET (END-TO-END)
-# ==============================================================================
+        
+        yield evt("VERDICT", verdict_payload, 0.1)
+        
+        yield evt("LOG", {"message": "Analyse terminée. Rapport généré."}, 0.1)
 
 if __name__ == "__main__":
-    print("STARTING NEURO-SYMBOLIC LEGAL SYSTEM ENGINE...")
-    
-    # 1. Instanciation
-    engine = LegalOrchestrator(case_id="FULL_DEMO_2025")
-    
-    # 2. Boucle d'exécution (Simulation d'un serveur API)
-    # On boucle jusqu'à ce que le système demande une info ou finisse
-    
-    keep_running = True
-    user_replied = False
-    
-    while keep_running:
-        time.sleep(0.5) # Pour la lisibilité des logs
-        
-        # Simulation de l'input utilisateur au bon moment
-        current_input = None
-        if engine.state_machine_status == WorkflowState.INTERACTING and not user_replied:
-            print("\n---  SIMULATING USER INTERACTION ---")
-            print("User sees question: ", engine._get_pending_question())
-            print("User types: 'Non, pas de faute.'")
-            current_input = {"answer": "NO_FAULT"}
-            user_replied = True # On ne répond qu'une fois pour la démo
-        
-        result = engine._legacy_run_step(user_input=current_input)
-        
-        if result.get("final_state") == "VERDICT":
-            print("\n FINAL VERDICT REACHED:")
-            print(result)
-            keep_running = False
-        
-        if result.get("status") == "WAITING_FOR_USER" and user_replied:
-            # Sécurité anti-boucle si la simulation input foire
-            pass
+    # Test runner pour debug
+    async def run():
+        orc = LegalOrchestrator("TEST")
+        async for e in orc.stream_analysis():
+            print(e)
+    asyncio.run(run())
