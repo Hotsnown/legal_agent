@@ -36,3 +36,7 @@ def get_planner_blueprint() -> List[Dict[str, Any]]:
 
 def get_interpretation_templates() -> List[Dict[str, Any]]:
     return load_domain_config().get("interpretations", [])
+
+
+def get_alexy_weights() -> List[Dict[str, Any]]:
+    return load_domain_config().get("alexy_weights", [])

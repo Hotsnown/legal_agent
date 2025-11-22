@@ -16,7 +16,7 @@ except ImportError:
     torch = None
 
 from system_state import (
-    SystemState, GraphNode, NodeType, Task, TaskStatus,
+    SystemState, GraphNode, NodeType, Task, TaskStatus, EventType,
     CommercialRelationship, RuptureContext, MisconductEvent,
     ExtendedCommercialRelationship, FinancialHistory, RelationshipAttestation,
     NonSolicitationCommitment, LogisticsCondition, UnilateralModification, DigitalMessage,
@@ -170,6 +170,153 @@ class ReasoningEngine:
                 self.emit_event(event_type, payload or {})
             except Exception:
                 pass
+
+    def generate_demo_plan(self, state: SystemState) -> List[Task]:
+        """
+        Construit une sequence fixe et dramatique pour la demo \"game loop\".
+        """
+        tasks = [
+            Task(task_id="t_ingest", action="DIGITAL_FORENSICS", label="Ingestion & Indexation", priority=100),
+            Task(task_id="t_interpret", action="ANALYZE_JURISDICTION", label="Analyse de Competence (New York)", priority=90),
+            Task(task_id="t_conflict", action="CHECK_MISCONDUCT", label="Controle des Griefs (Faute)", priority=80),
+            Task(task_id="t_alexy", action="CALCULATE_NOTICE", label="Calcul du Preavis (Alexy)", priority=70),
+            Task(task_id="t_verdict", action="GENERATE_REPORT", label="Redaction du Verdict", priority=60),
+        ]
+
+        for idx in range(1, len(tasks)):
+            tasks[idx].dependencies.append(tasks[idx - 1].task_id)
+
+        state.plan_queue = tasks
+        self._emit(
+            EventType.PLAN_GEN.value if hasattr(EventType.PLAN_GEN, "value") else EventType.PLAN_GEN,
+            {"tasks": [{"id": t.task_id, "action": t.action, "label": t.label, "dependencies": t.dependencies} for t in tasks]},
+        )
+        return tasks
+
+    def simulate_interpretation_gap(self, state: SystemState) -> Dict[str, Any]:
+        """
+        Simule la generation d'une regle dynamique neutralisant la clause New York.
+        """
+        clause_node_id = next(
+            (
+                nid
+                for nid, node in state.graph.nodes.items()
+                if "new york" in node.label.lower()
+                or (isinstance(node.content, dict) and node.content.get("jurisdiction", "").lower() == "new york")
+            ),
+            None,
+        )
+
+        generated_code = (
+            "def resolve_jurisdiction(clause: dict) -> bool:\\n"
+            "    if not clause:\\n"
+            "        return True\\n"
+            "    if clause.get('jurisdiction', '').lower() == 'new york':\\n"
+            "        return False  # Clause deemed void/inapplicable for the French forum\\n"
+            "    return True\\n"
+        )
+
+        resolution_node = GraphNode(
+            type=NodeType.RULE_APPLICATION,
+            label="Interpretation: Clause New York inapplicable",
+            world_tag=WorldTag.SHARED,
+            probability_score=0.93,
+            content={
+                "type": "interpretation",
+                "rule_id": "interp_clause_newyork_void",
+                "result": "Clause attributive (New York) neutralisee -> competence France",
+            },
+        )
+        state.graph.add_node(resolution_node)
+        if clause_node_id:
+            state.graph.add_edge(resolution_node.node_id, clause_node_id, EdgeType.INTERPRETS)
+
+        payload = {
+            "detected_ambiguity": "Clause attributive de juridiction (New York)",
+            "generated_code": generated_code,
+            "resolution_node": resolution_node,
+        }
+        self._emit(EventType.INTERPRETATION_REQ.value if hasattr(EventType.INTERPRETATION_REQ, "value") else EventType.INTERPRETATION_REQ, payload)
+        self._emit(
+            EventType.GRAPH_UPDATE.value if hasattr(EventType.GRAPH_UPDATE, "value") else EventType.GRAPH_UPDATE,
+            {"node_id": resolution_node.node_id, "label": resolution_node.label, "edge_target": clause_node_id},
+        )
+        return payload
+
+    def simulate_uncertainty_resolution(self, state: SystemState) -> Dict[str, Any]:
+        """
+        Simule un blocage par entropie sur la faute grave et la question posee a l'utilisateur.
+        """
+        misconduct_node_id = next(
+            (nid for nid, node in state.graph.nodes.items() if isinstance(node.content, MisconductEvent)), None
+        )
+
+        counter_evidence_node = GraphNode(
+            type=NodeType.EVIDENCE,
+            label="Email 2011: Tolerance confirmee",
+            world_tag=WorldTag.SHARED,
+            probability_score=0.98,
+            content={
+                "type": "email",
+                "subject": "Re: Paiement differe",
+                "summary": "Tolerance expresse sur les retards 2011",
+            },
+            grounding=Grounding(
+                source_doc_id="Email_Accord_Tolerance_2011.msg",
+                page_number=1,
+                text_span="Oui, un email de 2011 confirme notre tolerance.",
+            ),
+        )
+        state.graph.add_node(counter_evidence_node)
+        if misconduct_node_id:
+            state.graph.add_edge(counter_evidence_node.node_id, misconduct_node_id, EdgeType.CONTRADICTS)
+
+        payload = {
+            "entropy_score": 0.85,
+            "question": "Avez-vous explicitement accepte ces retards de paiement par ecrit ?",
+            "simulated_answer": "Oui, un email de 2011 confirme notre tolerance.",
+            "counter_evidence_node": counter_evidence_node,
+        }
+        self._emit(EventType.UNCERTAINTY_REQ.value if hasattr(EventType.UNCERTAINTY_REQ, "value") else EventType.UNCERTAINTY_REQ, payload)
+        return payload
+
+    def simulate_alexy_steps(self, state: SystemState) -> List[Dict[str, Any]]:
+        """
+        Deroule pas a pas la ponderation (Alexy) pour afficher le calcul du preavis.
+        """
+        steps: List[Dict[str, Any]] = []
+        cumulative = 0.0
+
+        def add_step(label: str, delta: float, step_type: str) -> None:
+            nonlocal cumulative
+            cumulative += delta
+            steps.append(
+                {
+                    "label": label,
+                    "delta_months": delta,
+                    "cumulative_months": cumulative,
+                    "type": step_type,
+                }
+            )
+
+        add_step("Anciennete (25 ans)", 18.0, "BASE")
+        add_step("Dependance Economique (>20%)", 2.0, "AGGRAVATING")
+        add_step("Exclusivite de fait", 4.0, "AGGRAVATING")
+        steps.append(
+            {
+                "label": "Preavis total",
+                "delta_months": 0.0,
+                "cumulative_months": cumulative,
+                "type": "TOTAL",
+            }
+        )
+
+        state.alexy_notice_months = cumulative
+        self._emit(
+            EventType.TASK_UPDATE.value if hasattr(EventType.TASK_UPDATE, "value") else EventType.TASK_UPDATE,
+            {"alexy_steps": steps, "notice_months": cumulative},
+        )
+        return steps
 
     def plan_strategy(self, state: SystemState):
         """Appelle le Planner et remplit la queue du State."""
@@ -340,6 +487,201 @@ class ReasoningEngine:
         if created:
             state.interpretations_applied = list(sorted(already_noted.union(created)))
         return created
+
+    def simulate_alexy_steps(self, state: SystemState) -> List[Dict[str, Any]]:
+        """
+        Simule pas a pas le calcul du preavis raisonnable pour un affichage en streaming.
+        """
+        steps: List[Dict[str, Any]] = []
+
+        def normalize_rate(rate: Optional[float]) -> float:
+            try:
+                value = float(rate)
+            except (TypeError, ValueError):
+                return 0.0
+            if value > 1.0:
+                # Si la valeur est en pourcentage (ex: 35), on ramene a une base 1.0.
+                value = value / 100.0
+            return max(0.0, min(1.0, value))
+
+        def format_months(value: float, signed: bool = True) -> str:
+            prefix = "+" if signed and value >= 0 else ""
+            if signed and value < 0:
+                prefix = "-"
+            suffix_value = abs(value) if signed else value
+            return f"{prefix}{suffix_value:.1f} months"
+
+        def add_step(step_type: str, label: str, delta: float, running_total: float, meta: Optional[Dict[str, Any]] = None, signed: bool = True, custom_impact: Optional[str] = None):
+            entry = {
+                "type": step_type,
+                "label": label,
+                "impact": round(delta, 2),
+                "impact_str": custom_impact or format_months(delta, signed=signed),
+                "running_total": round(running_total, 2),
+                "total": round(running_total, 2),
+            }
+            if meta:
+                entry["meta"] = meta
+            steps.append(entry)
+
+        def extract_years_and_dependency(items: Optional[List[Any]]) -> Tuple[float, float]:
+            years: List[int] = []
+            dep_values: List[float] = []
+            for entry in items or []:
+                year_val = None
+                dep_val = None
+                if hasattr(entry, "year"):
+                    year_val = getattr(entry, "year")
+                elif isinstance(entry, dict):
+                    year_val = entry.get("year")
+                if hasattr(entry, "percentage_of_provider_total_revenue"):
+                    dep_val = getattr(entry, "percentage_of_provider_total_revenue")
+                elif isinstance(entry, dict):
+                    dep_val = entry.get("percentage_of_provider_total_revenue")
+                if year_val is not None:
+                    try:
+                        years.append(int(year_val))
+                    except (TypeError, ValueError):
+                        pass
+                if dep_val is not None:
+                    dep_values.append(normalize_rate(dep_val))
+            span = (max(years) - min(years) + 1) if years else 0.0
+            return span, (max(dep_values) if dep_values else 0.0)
+
+        tenure_years = 0.0
+        dependency_rate = 0.0
+        exclusivity_hits = 0
+        has_unilateral_modification = False
+
+        for node in state.graph.nodes.values():
+            content = getattr(node, "content", None)
+            if content is None:
+                continue
+
+            if isinstance(content, ExtendedCommercialRelationship):
+                span, dep_hint = extract_years_and_dependency(content.financial_history)
+                dependency_rate = max(dependency_rate, dep_hint, normalize_rate(content.dependency_rate))
+                tenure_years = max(tenure_years, span)
+
+                history_years = []
+                for turn in content.financial_history or []:
+                    try:
+                        year_val = getattr(turn, "year", None) if hasattr(turn, "year") else None
+                        if isinstance(turn, dict):
+                            year_val = year_val or turn.get("year")
+                        if year_val:
+                            history_years.append(int(year_val))
+                    except Exception:
+                        continue
+                if content.start_date:
+                    end_year = content.last_active_year or (max(history_years) if history_years else content.start_date.year)
+                    try:
+                        tenure_years = max(tenure_years, max(1.0, end_year - content.start_date.year + 1))
+                    except Exception:
+                        pass
+                if getattr(content.characteristics, "is_exclusive", False):
+                    exclusivity_hits += 1
+            elif isinstance(content, CommercialRelationship):
+                tenure_years = max(tenure_years, getattr(content, "duration_years", 0.0) or 0.0)
+                if getattr(content, "is_exclusive", False):
+                    exclusivity_hits += 1
+            elif isinstance(content, RelationshipAttestation):
+                try:
+                    tenure_years = max(
+                        tenure_years, content.period_end_year - content.period_start_year + 1
+                    )
+                except Exception:
+                    pass
+            elif isinstance(content, FinancialHistory):
+                span, dep_hint = extract_years_and_dependency(content.data_points)
+                tenure_years = max(tenure_years, span)
+                dependency_rate = max(dependency_rate, dep_hint)
+            elif isinstance(content, NonSolicitationCommitment):
+                exclusivity_hits += 1
+            elif isinstance(content, UnilateralModification):
+                has_unilateral_modification = True
+
+        tenure_years = max(1.0, tenure_years)
+        dependency_rate = max(0.0, min(1.0, dependency_rate))
+
+        running_total = 0.0
+        base_notice = min(18.0, 0.8 * tenure_years)
+        running_total = base_notice
+        add_step(
+            "BASE",
+            f"Ancienneté ({tenure_years:.1f} ans)",
+            base_notice,
+            running_total,
+            meta={"tenure_years": round(tenure_years, 2)},
+            signed=False,
+        )
+
+        dep_delta = 0.0
+        if dependency_rate > 0.2:
+            if dependency_rate >= 0.5:
+                dep_delta = 4.0
+            elif dependency_rate >= 0.35:
+                dep_delta = 3.0
+            else:
+                dep_delta = 2.0
+        running_total += dep_delta
+        add_step(
+            "AGGRAVATING",
+            "Dépendance Économique (>20%)",
+            dep_delta,
+            running_total,
+            meta={"dependency_rate": round(dependency_rate, 4)},
+        )
+
+        exclusivity_delta = 0.0
+        if exclusivity_hits:
+            exclusivity_delta = 6.0 if exclusivity_hits > 1 or dependency_rate >= 0.5 else 4.0
+        running_total += exclusivity_delta
+        add_step(
+            "AGGRAVATING",
+            "Exclusivité de fait",
+            exclusivity_delta,
+            running_total,
+            meta={"exclusivity_sources": exclusivity_hits},
+        )
+
+        brutality_delta = 2.0 if has_unilateral_modification else 0.0
+        running_total += brutality_delta
+        add_step(
+            "AGGRAVATING",
+            "Aggravant : Brutalité partielle",
+            brutality_delta,
+            running_total,
+            meta={"unilateral_modification": has_unilateral_modification},
+        )
+
+        if running_total > 36.0:
+            cap_delta = 36.0 - running_total
+            running_total = 36.0
+            add_step(
+                "CAP",
+                "Plafond légal (36 mois)",
+                cap_delta,
+                running_total,
+                meta={"cap": 36},
+            )
+
+        add_step(
+            "FINAL",
+            "Préavis simulé (Alexy)",
+            0.0,
+            running_total,
+            custom_impact=format_months(running_total, signed=False),
+            signed=False,
+        )
+
+        state.alexy_notice_months = running_total
+        try:
+            setattr(state, "reasoning_trace", steps)
+        except Exception:
+            pass
+
+        return steps
 
     def apply_alexy_balancing(self, state: SystemState) -> float:
         """

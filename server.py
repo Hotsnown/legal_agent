@@ -1,168 +1,158 @@
-# server.py
-import uuid
+import asyncio
 import json
-from typing import Dict, Optional
+import uuid
 from pathlib import Path
+from typing import Any, AsyncGenerator, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
-# Import de nos modules précédents
-from orchestrator import LegalOrchestrator, WorkflowState
-from system_state import SystemState
 from domain_config import load_domain_config
+from orchestrator import LegalOrchestrator
 
-# Dans server.py
-
-# ... imports ...
 
 app = FastAPI(title="Neuro-Symbolic Legal Engine API")
 
-# MODIFICATION ICI : Remplacez ["*"] par l'adresse explicite de votre frontend
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000"
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # <--- Explicite au lieu de ["*"]
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- MÉMOIRE VOLATILE (Simule une DB Redis/Postgres) ---
+# ------------------------------------------------------------------------------
+# Global state
+# ------------------------------------------------------------------------------
 ACTIVE_CASES: Dict[str, LegalOrchestrator] = {}
 
-# --- MODÈLES API ---
+
+def get_case_or_404(case_id: str) -> LegalOrchestrator:
+    orchestrator = ACTIVE_CASES.get(case_id)
+    if orchestrator is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return orchestrator
+
+
+def get_or_create_case(case_id: str, data_dir: str = "data") -> LegalOrchestrator:
+    """
+    Utility for demo-mode: lazily bootstraps a case if it does not yet exist.
+    """
+    orchestrator = ACTIVE_CASES.get(case_id)
+    if orchestrator is None:
+        orchestrator = LegalOrchestrator(case_id=case_id, data_dir=data_dir)
+        ACTIVE_CASES[case_id] = orchestrator
+    return orchestrator
+
+
+# ------------------------------------------------------------------------------
+# Request models
+# ------------------------------------------------------------------------------
 class CreateCaseRequest(BaseModel):
-    filename: str
+    data_dir: str | None = None
+    filename: str | None = None
+
+
+class CreateCaseResponse(BaseModel):
+    case_id: str
+    message: str
+
 
 class UserReplyRequest(BaseModel):
     answer: str
 
-# --- ENDPOINTS ---
 
-@app.post("/cases")
-def create_case(req: CreateCaseRequest):
-    """Initialise un nouveau dossier d'enquête."""
-    case_id = str(uuid.uuid4())[:8]
-    # On instancie l'Orchestrateur (Module 5)
-    orchestrator = LegalOrchestrator(case_id=case_id)
+# ------------------------------------------------------------------------------
+# Endpoints
+# ------------------------------------------------------------------------------
+@app.post("/cases", response_model=CreateCaseResponse)
+async def create_case(req: CreateCaseRequest) -> CreateCaseResponse:
+    case_id = uuid.uuid4().hex[:8]
+    orchestrator = LegalOrchestrator(case_id=case_id, data_dir=req.data_dir or "data")
     ACTIVE_CASES[case_id] = orchestrator
-    
-    return {
-        "case_id": case_id, 
-        "message": "Dossier initialisé. Prêt pour l'analyse.",
-        "state": orchestrator.state_machine_status.name
-    }
+    return CreateCaseResponse(case_id=case_id, message="Case initialized and ready.")
 
-@app.post("/cases/{case_id}/step")
-def run_step(case_id: str):
-    """
-    Force le système à avancer d'un pas (Step).
-    Le Frontend appellera ceci en boucle ou manuellement.
-    """
-    if case_id not in ACTIVE_CASES:
-        raise HTTPException(status_code=404, detail="Case not found")
-    
-    orchestrator = ACTIVE_CASES[case_id]
-    
-    # On exécute un pas de la Machine à États
-    result = orchestrator._legacy_run_step()
-    
-    # On formate la réponse pour l'UI
-    response = {
-        "current_state": orchestrator.state_machine_status.name,
-        "entropy": orchestrator.system_state.entropy,
-        "logs": result, # Ce que le step a retourné (ex: transition info)
-        "plan": [t.action for t in orchestrator.system_state.plan_queue],
-        "facts_count": len(orchestrator.system_state.graph.nodes),
-        "alexy_notice": orchestrator.system_state.alexy_notice_months,
-        "interpretations": orchestrator.system_state.interpretations_applied,
-        "replans": orchestrator.system_state.replan_history,
-        "domain_version": orchestrator.system_state.domain_version,
-    }
-    
-    # Si le système attend une réponse, on renvoie la question
-    if orchestrator.state_machine_status == WorkflowState.INTERACTING:
-        response["question"] = orchestrator._get_pending_question()
-        
-    # Si verdict, on renvoie la décision
-    if result.get("final_state") == "VERDICT":
-        response["verdict"] = result
-    
-    return response
 
 @app.get("/cases/{case_id}/stream")
-async def stream_case(case_id: str):
-    """Streaming SSE des micro-�v�nements du raisonnement."""
-    if case_id not in ACTIVE_CASES:
-        raise HTTPException(status_code=404, detail="Case not found")
-    orchestrator = ACTIVE_CASES[case_id]
+async def stream_case(case_id: str, request: Request) -> StreamingResponse:
+    # Auto-create the case for demo friendliness (frontend defaults to "demo-case").
+    orchestrator = get_or_create_case(case_id)
 
-    async def event_generator():
-        async for event in orchestrator.stream_analysis():
-            yield {"data": json.dumps(event)}
+    async def event_stream() -> AsyncGenerator[str, None]:
+        try:
+            async for event in orchestrator.stream_analysis():
+                if await request.is_disconnected():
+                    break
+                payload = json.dumps(event, default=str)
+                yield f"data: {payload}\n\n"
 
-    return EventSourceResponse(event_generator())
+            # Signal end-of-run and keep the connection alive to avoid client auto-reconnect loops.
+            yield "data: {\"type\": \"STREAM_END\", \"payload\": {}}\n\n"
+            while not await request.is_disconnected():
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            return
+
+    headers = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+
 
 @app.post("/cases/{case_id}/reply")
-def reply_to_system(case_id: str, reply: UserReplyRequest):
-    """L'utilisateur répond à une question du Module 4."""
-    if case_id not in ACTIVE_CASES:
-        raise HTTPException(status_code=404, detail="Case not found")
-    
-    orchestrator = ACTIVE_CASES[case_id]
-    
-    # On vérifie qu'on est bien en attente
-    if orchestrator.state_machine_status != WorkflowState.INTERACTING:
-        raise HTTPException(status_code=400, detail="System is not waiting for input.")
-    
-    # On injecte la réponse
-    # Note: run_step gère l'input utilisateur s'il est fourni
-    result = orchestrator._legacy_run_step(user_input={"answer": reply.answer})
-    
-    return {"status": "Reply processed", "next_state": orchestrator.state_machine_status.name}
+async def reply_to_case(case_id: str, reply: UserReplyRequest) -> Dict[str, Any]:
+    orchestrator = get_case_or_404(case_id)
+    orchestrator._publish_event("USER_REPLY", {"answer": reply.answer})
+    return {"status": "received", "case_id": case_id}
+
 
 @app.get("/cases/{case_id}/graph")
-def get_graph_data(case_id: str):
-    """Pour la visualisation du Graphe."""
-    if case_id not in ACTIVE_CASES:
-        raise HTTPException(status_code=404, detail="Case not found")
-    
-    state = ACTIVE_CASES[case_id].system_state
-    
-    # Sérialisation propre des noeuds ET des arêtes
-    nodes_data = []
-    for k, v in state.graph.nodes.items():
-        nodes_data.append({
-            "id": k,
-            "label": v.label,
-            "type": v.type,
-            "world_tag": v.world_tag,
-            "probability": v.probability_score,
-            "grounding": v.grounding.dict() if v.grounding else None,
-            "description": str(v.content) if hasattr(v, 'content') else ""
-        })
+async def get_graph(case_id: str) -> Dict[str, Any]:
+    state = get_case_or_404(case_id).system_state
 
-    edges_data = []
-    for e in state.graph.edges:
-        edges_data.append({
-            "source": e.source_id,
-            "target": e.target_id,
-            "type": e.type
-        })
+    def encode(obj: Any) -> Any:
+        try:
+            return jsonable_encoder(obj)
+        except Exception:
+            return str(obj)
 
-    return {"nodes": nodes_data, "edges": edges_data}
+    nodes = []
+    for node in state.graph.nodes.values():
+        nodes.append(
+            {
+                "id": node.node_id,
+                "label": node.label,
+                "type": node.type.value if hasattr(node.type, "value") else str(node.type),
+                "world_tag": node.world_tag.value if hasattr(node.world_tag, "value") else str(node.world_tag),
+                "probability": node.probability_score,
+                "description": node.description,
+                "grounding": node.grounding.model_dump() if node.grounding else None,
+                "content": encode(node.content),
+            }
+        )
+
+    edges = []
+    for edge in state.graph.edges:
+        edges.append(
+            {
+                "source": edge.source_id,
+                "target": edge.target_id,
+                "type": edge.type.value if hasattr(edge.type, "value") else str(edge.type),
+                "weight": edge.weight,
+            }
+        )
+
+    return {"nodes": nodes, "edges": edges}
+
 
 @app.get("/static/{doc_path:path}")
-def serve_document(doc_path: str):
-    """Expose les documents sources pour l'aperçu PDF/Doc côté front."""
+async def serve_document(doc_path: str):
     base_dir = Path("data").resolve()
     file_path = (base_dir / doc_path).resolve()
     if base_dir not in file_path.parents and file_path != base_dir:
@@ -173,11 +163,11 @@ def serve_document(doc_path: str):
 
 
 @app.get("/domain-config")
-def get_domain_manifest():
-    """Expose la configuration du domaine (ontologie, règles, plan)."""
+async def get_domain_manifest():
     return load_domain_config()
+
 
 if __name__ == "__main__":
     import uvicorn
-    print("🔥 Starting Neuro-Symbolic Backend on port 8000...")
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

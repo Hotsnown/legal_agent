@@ -200,59 +200,107 @@ class RegexPerceptionEngine:
             },
         )
 
+
     def _inject_demo_fault_event(self, state: SystemState):
         """
         STEP 3 : L'attaque.
-        Crée le Monde B (Faute) et le LIE au concept de Rupture pour créer une tension visuelle.
+        Crée un cluster d'alerte dans le Monde B (faute) pour créer un effet visuel dramatique.
         """
-        from system_state import MisconductEvent, EdgeType # Import EdgeType
+        from system_state import MisconductEvent
 
-        # 1. Création du fait (Nœud Rouge)
+        if "demo_node_fault_root" in state.graph.nodes:
+            return
+
         fault = MisconductEvent(
             date_of_occurrence=datetime(2011, 5, 20),
             date_of_discovery=datetime(2011, 6, 1),
             type="NON_PAYMENT",
             description="Retard de paiement facture F-2011-05",
-            was_previously_tolerated=False 
+            was_previously_tolerated=False,
         )
-        
-        fault_node_id = "demo_node_fault_impayes" # ID fixe pour pouvoir le retrouver plus tard
-        
-        node = GraphNode(
-            node_id=fault_node_id, # On fixe l'ID
+
+        root_node = GraphNode(
+            node_id="demo_node_fault_root",
             type=NodeType.FACT,
-            label="Allégation: Impayés répétés",
-            world_tag=WorldTag.NARRATIVE_B,  # MONDE B (ROUGE)
-            probability_score=0.60,
+            label="Allégation: Impayés récurrents",
+            world_tag=WorldTag.NARRATIVE_B,
+            probability_score=0.6,
             content=fault,
             grounding=Grounding(
                 source_doc_id="Email_Relance_2011.msg",
                 page_number=1,
-                text_span="Nous constatons encore un retard de paiement ce mois-ci."
-            )
+                text_span="Nous constatons encore un retard de paiement ce mois-ci.",
+            ),
         )
-        self._register_node(state, node)
+        self._register_node(state, root_node)
         self._emit(
             "NARRATIVE_EMERGENCE",
             {
-                "id": node.node_id,
-                "label": node.label,
-                "world_tag": node.world_tag.value if hasattr(node.world_tag, "value") else node.world_tag,
+                "id": root_node.node_id,
+                "label": root_node.label,
+                "world_tag": root_node.world_tag.value if hasattr(root_node.world_tag, "value") else root_node.world_tag,
                 "message": "Narratif B (Faute grave) detecte",
             },
         )
-        
-        # 2. CRÉATION DU LIEN (DYNAMIQUE)
-        # On relie cette faute au noeud "Rupture Brutale" pour dire "Ceci JUSTIFIE cela"
-        # On cherche le noeud pivot créé par _synthesize_edges
-        target_id = "reason_rupture_brutale" 
-        
-        # Si le noeud n'existe pas encore (si on n'a pas fait _synthesize), on le crée à la volée
-        if target_id not in state.graph.nodes:
-             self._get_or_create_reason_node(state, target_id, "Rupture Brutale", 0.5)
 
-        self._register_edge(state, node.node_id, target_id, EdgeType.CAUSES)
-        print(f"   -> [GRAPH] New Edge: {node.label} --[CAUSES]--> Rupture Brutale")
+        satellites = [
+            (
+                GraphNode(
+                    node_id="demo_fault_invoice",
+                    type=NodeType.EVIDENCE,
+                    label="Facture F-2011-05 Impayée",
+                    world_tag=WorldTag.NARRATIVE_B,
+                    probability_score=0.55,
+                    content={"type": "invoice", "status": "UNPAID", "ref": "F-2011-05"},
+                    grounding=Grounding(
+                        source_doc_id="Facture_F-2011-05.pdf",
+                        page_number=1,
+                        text_span="Facture F-2011-05 non réglée",
+                    ),
+                ),
+                EdgeType.PROVES,
+            ),
+            (
+                GraphNode(
+                    node_id="demo_fault_letter",
+                    type=NodeType.EVIDENCE,
+                    label="Lettre de Mise en Demeure",
+                    world_tag=WorldTag.NARRATIVE_B,
+                    probability_score=0.58,
+                    content={"type": "formal_notice", "date": "2011-05-28"},
+                    grounding=Grounding(
+                        source_doc_id="Lettre_Mise_en_Demeure_2011.pdf",
+                        page_number=1,
+                        text_span="Mise en demeure pour impayés récurrents",
+                    ),
+                ),
+                EdgeType.PROVES,
+            ),
+            (
+                GraphNode(
+                    node_id="demo_fault_credit",
+                    type=NodeType.FACT,
+                    label="Suspension de ligne de crédit",
+                    world_tag=WorldTag.NARRATIVE_B,
+                    probability_score=0.5,
+                    content={"type": "credit_line_suspension", "impact": "cashflow"},
+                    grounding=Grounding(
+                        source_doc_id="Note_Interne_Credit.msg",
+                        page_number=1,
+                        text_span="Suspension immédiate de la ligne de crédit",
+                    ),
+                ),
+                EdgeType.CAUSES,
+            ),
+        ]
+
+        for sat_node, etype in satellites:
+            self._register_node(state, sat_node)
+            self._register_edge(state, sat_node.node_id, root_node.node_id, etype)
+
+        if "reason_rupture_brutale" in state.graph.nodes:
+            self._register_edge(state, root_node.node_id, "reason_rupture_brutale", EdgeType.CAUSES)
+            print(f"   -> [GRAPH] New Edge: {root_node.label} --[CAUSES]--> Rupture Brutale")
 
 
     def _inject_demo_tolerance_evidence(self, state: SystemState):
@@ -260,71 +308,52 @@ class RegexPerceptionEngine:
         STEP 5 : Le Twist (Collapse).
         Une preuve apparaît et TUE le narratif B.
         """
-        from system_state import EdgeType
-
-        # 1. Création de la preuve (Nœud Vert/Bleu)
-        evidence_id = "demo_node_evidence_tolerance"
-        
-        node = GraphNode(
-            node_id=evidence_id,
+        evidence_node = GraphNode(
+            node_id="demo_node_tolerance",
             type=NodeType.EVIDENCE,
-            label="Preuve: Email de Tolérance",
+            label="Email: Pas de souci pour le délai",
             world_tag=WorldTag.SHARED,
             probability_score=0.99,
             content={"type": "email", "subject": "Pas de souci pour le délai"},
             grounding=Grounding(
                 source_doc_id="Email_Accord_Finance.msg",
                 page_number=1,
-                text_span="Ne vous inquiétez pas pour le retard, on gère ça le mois prochain."
-            )
+                text_span="Pas de souci pour le délai, on réglera ça le mois prochain.",
+            ),
         )
-        self._register_node(state, node)
+        self._register_node(state, evidence_node)
 
-        # 2. CRÉATION DU LIEN DE CONTRADICTION
-        # Cette preuve ATTAQUE le noeud de faute.
-        target_fault_id = "demo_node_fault_impayes"
-        
+        target_fault_id = "demo_node_fault_root"
         if target_fault_id in state.graph.nodes:
-            self._register_edge(state, node.node_id, target_fault_id, EdgeType.CONTRADICTS)
+            self._register_edge(state, evidence_node.node_id, target_fault_id, EdgeType.CONTRADICTS)
             self._emit(
                 "COLLAPSE_TRIGGER",
                 {
-                    "evidence_id": node.node_id,
+                    "evidence_id": evidence_node.node_id,
                     "target_id": target_fault_id,
                     "edge_type": EdgeType.CONTRADICTS.value if hasattr(EdgeType.CONTRADICTS, "value") else EdgeType.CONTRADICTS,
                 },
             )
-            print(f"   -> [GRAPH] New Edge: {node.label} --[CONTRADICTS]--> Allégation Impayés")
 
-            # 3. LE COLLAPSE (Mise à jour immédiate des probabilités)
-            # Dans un vrai système, c'est le ReasoningEngine qui ferait ça au Step suivant.
-            # Pour la démo visuelle instantanée, on le fait ici.
-            fault_node = state.graph.nodes[target_fault_id]
-            fault_node.probability_score = 0.05 # Le noeud devient transparent/fantôme
-            fault_node.label += " (REJETÉ)"     # Feedback textuel immédiat
-            
-            # On renforce le narratif A (Rupture Brutale) car l'excuse est tombée
-            if "reason_rupture_brutale" in state.graph.nodes:
-                state.graph.nodes["reason_rupture_brutale"].probability_score = 0.95
+        collapsed_nodes = []
+        for nid in ["demo_node_fault_root", "demo_fault_invoice", "demo_fault_letter", "demo_fault_credit"]:
+            node = state.graph.nodes.get(nid)
+            if not node:
+                continue
+            node.probability_score = 0.05
+            suffix = " (REJETÉ)" if node.type in {NodeType.FACT, NodeType.EVENT} else " (COLLAPSED)"
+            if suffix not in node.label:
+                node.label += suffix
+            collapsed_nodes.append(nid)
 
-            self._emit(
-                "NARRATIVE_COLLAPSE",
-                {
-                    "collapsed_id": target_fault_id,
-                    "rescued_by": node.node_id,
-                    "message": "Preuve de tolerance neutralise la faute grave",
-                },
-            )
-        # 2. Mise à jour immédiate du graphe (Simuler le Reasoning Engine ici pour la démo)
-        # On cherche le noeud de faute et on le marque comme "Toléré" ou on baisse sa proba
-        for n in state.graph.nodes.values():
-            if n.label == "Allégation: Impayés répétés":
-                n.probability_score = 0.05 # COLLAPSE DU MONDE B
-                n.world_tag = WorldTag.NARRATIVE_B # Reste tagué B pour montrer qu'il a perdu
-                # On peut ajouter un champ dans content pour expliquer
-                if hasattr(n.content, 'was_condoned'):
-                    n.content.was_condoned = True
-
+        self._emit(
+            "NARRATIVE_COLLAPSE",
+            {
+                "collapsed_nodes": collapsed_nodes,
+                "rescued_by": evidence_node.node_id,
+                "message": "Preuve de tolerance neutralise la faute grave",
+            },
+        )
     # ------------------------------------------------------------------ #
     # File helpers
     # ------------------------------------------------------------------ #
