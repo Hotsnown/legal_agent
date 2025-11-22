@@ -70,7 +70,29 @@ class LegalOrchestrator:
         if self.step_counter > self.MAX_STEPS:
             print(" MAX BUDGET EXCEEDED. Forcing Verdict.")
             self.state_machine_status = WorkflowState.VERDICT
+        
+        # --- SCENARIO SCRIPTÉ POUR LA DÉMO ---
+        
+        # STEP 2: Injection d'un Defeater (Clause New York) qui sera rejeté
+        if self.step_counter == 2:
+            print(">>> [DEMO] Injection du Defeater 'Incompétence'...")
+            # On simule que le système "voit" une clause mais décide qu'elle est inapplicable
+            # (Cela créera un noeud qui passera au rouge plus tard)
+            self.perception._inject_demo_clause_competence(self.system_state)
 
+        # STEP 3: Apparition du NARRATIVE B (Faute Grave)
+        if self.step_counter == 3:
+            print(">>> [DEMO] Emergence du narratif Défendeur (Faute Grave)...")
+            self.perception._inject_demo_fault_event(self.system_state)
+            # Force une replanification car un fait nouveau majeur est apparu
+            self.reasoner.request_replan("Nouveau narratif détecté: Faute Grave")
+
+        # STEP 5: The Twist (Preuve de Tolérance)
+        if self.step_counter == 5:
+            print(">>> [DEMO] Découverte de la preuve de tolérance (The Twist)...")
+            self.perception._inject_demo_tolerance_evidence(self.system_state)
+        
+        # ... reste du code existant ...
         # 2. State Machine Logic
         current = self.state_machine_status
         

@@ -184,155 +184,155 @@ class ReasoningEngine:
         state.plan_queue = plan
         return plan
 
+    def generate_interpretations(self, state: SystemState) -> List[str]:
+        """
+        Cree des noeuds d'interpretation (regles dynamiques) bases sur les faits ingeres.
+        """
+        created: List[str] = []
+        existing_rule_ids = {r.rule_id for r in state.rules_registry}
+        already_noted = set(state.interpretations_applied)
 
-def generate_interpretations(self, state: SystemState) -> List[str]:
-    """
-    Cree des noeuds d'interpretation (regles dynamiques) bases sur les faits ingeres.
-    """
-    created: List[str] = []
-    existing_rule_ids = {r.rule_id for r in state.rules_registry}
-    already_noted = set(state.interpretations_applied)
+        def edge_exists(src: str, tgt: str, etype: EdgeType) -> bool:
+            return any(e.source_id == src and e.target_id == tgt and e.type == etype for e in state.graph.edges)
 
-    def edge_exists(src: str, tgt: str, etype: EdgeType) -> bool:
-        return any(e.source_id == src and e.target_id == tgt and e.type == etype for e in state.graph.edges)
+        def resolve_meta(key: str, default_rule: str, default_label: str, default_probability: float):
+            meta = (self.interpretation_templates or {}).get(key, {}) if hasattr(self, "interpretation_templates") else {}
+            label = meta.get("label", default_label)
+            rule_id = meta.get("rule_id", default_rule)
+            prob = meta.get("probability", default_probability)
+            desc = meta.get("description", "")
+            return label, rule_id, prob, desc
 
-    def resolve_meta(key: str, default_rule: str, default_label: str, default_probability: float):
-        meta = (self.interpretation_templates or {}).get(key, {}) if hasattr(self, "interpretation_templates") else {}
-        label = meta.get("label", default_label)
-        rule_id = meta.get("rule_id", default_rule)
-        prob = meta.get("probability", default_probability)
-        desc = meta.get("description", "")
-        return label, rule_id, prob, desc
+        competence_triggered = False
 
-    competence_triggered = False
+        for node_id, node in list(state.graph.nodes.items()):
+            content = node.content
+            grounding: Optional[Grounding] = node.grounding if hasattr(node, "grounding") else None
 
-    for node_id, node in list(state.graph.nodes.items()):
-        content = node.content
-        grounding: Optional[Grounding] = node.grounding if hasattr(node, "grounding") else None
-
-        if isinstance(content, LogisticsCondition) and content.is_tacitly_renewable:
-            label, rule_id, probability, meta_desc = resolve_meta(
-                "franco_tacite", "interp_franco_tacite", "Interpretation : Franco reconduit", 0.82
-            )
-            if rule_id not in existing_rule_ids:
-                state.rules_registry.append(
+            if isinstance(content, LogisticsCondition) and content.is_tacitly_renewable:
+                label, rule_id, probability, meta_desc = resolve_meta(
+                    "franco_tacite", "interp_franco_tacite", "Interpretation : Franco reconduit", 0.82
+                )
+                if rule_id not in existing_rule_ids:
+                    state.rules_registry.append(
                         Rule(
                             rule_id=rule_id,
                             type=RuleType.DYNAMIC,
                             description=meta_desc or "Le franco tacite impose un preavis aligne sur la duree initiale",
                             python_snippet="def compute(condition):\\n    if condition.get('is_tacitly_renewable'):\\n        return condition.get('initial_duration_months', 0)\\n    return 0",
                         )
-                )
-                existing_rule_ids.add(rule_id)
-            target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
-            if not target_node_id:
-                interp_node = GraphNode(
-                    type=NodeType.RULE_APPLICATION,
-                    label=label,
-                    world_tag=WorldTag.SHARED,
-                    probability_score=probability,
-                    content={"type": "interpretation", "rule_id": rule_id},
-                )
-                state.graph.add_node(interp_node)
-                target_node_id = interp_node.node_id
-            if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
-                state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
-            created.append(label)
+                    )
+                    existing_rule_ids.add(rule_id)
+                target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
+                if not target_node_id:
+                    interp_node = GraphNode(
+                        type=NodeType.RULE_APPLICATION,
+                        label=label,
+                        world_tag=WorldTag.SHARED,
+                        probability_score=probability,
+                        content={"type": "interpretation", "rule_id": rule_id},
+                    )
+                    state.graph.add_node(interp_node)
+                    target_node_id = interp_node.node_id
+                if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
+                    state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
+                created.append(label)
 
-        if isinstance(content, UnilateralModification) and content.severity >= 0.5:
-            label, rule_id, probability, meta_desc = resolve_meta(
-                "unilateral_modification",
-                "interp_unilateral_drop",
-                "Interpretation : modification unilaterale",
-                0.8,
-            )
-            if rule_id not in existing_rule_ids:
-                state.rules_registry.append(
+            if isinstance(content, UnilateralModification) and content.severity >= 0.5:
+                label, rule_id, probability, meta_desc = resolve_meta(
+                    "unilateral_modification",
+                    "interp_unilateral_drop",
+                    "Interpretation : modification unilaterale",
+                    0.8,
+                )
+                if rule_id not in existing_rule_ids:
+                    state.rules_registry.append(
                         Rule(
                             rule_id=rule_id,
                             type=RuleType.DYNAMIC,
                             description=meta_desc or "Une concession imposee sans preavis accroit la brutalite",
                             python_snippet="def compute(severity):\\n    return max(0.0, min(1.0, 0.4 + 0.5*severity))",
                         )
-                )
-                existing_rule_ids.add(rule_id)
-            target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
-            if not target_node_id:
-                interp_node = GraphNode(
-                    type=NodeType.RULE_APPLICATION,
-                    label=label,
-                    world_tag=WorldTag.SHARED,
-                    probability_score=probability,
-                    content={"type": "interpretation", "rule_id": rule_id},
-                )
-                state.graph.add_node(interp_node)
-                target_node_id = interp_node.node_id
-            if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
-                state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
-            created.append(label)
+                    )
+                    existing_rule_ids.add(rule_id)
+                target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
+                if not target_node_id:
+                    interp_node = GraphNode(
+                        type=NodeType.RULE_APPLICATION,
+                        label=label,
+                        world_tag=WorldTag.SHARED,
+                        probability_score=probability,
+                        content={"type": "interpretation", "rule_id": rule_id},
+                    )
+                    state.graph.add_node(interp_node)
+                    target_node_id = interp_node.node_id
+                if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
+                    state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
+                created.append(label)
 
-        if isinstance(content, DigitalMessage) and content.platform in ("WHATSAPP", "EMAIL", "SMS"):
-            label, rule_id, probability, meta_desc = resolve_meta(
-                "digital_written",
-                "interp_digital_written",
-                "Interpretation : Message digital = ecrit",
-                0.78,
-            )
-            if rule_id not in existing_rule_ids:
-                state.rules_registry.append(
+            if isinstance(content, DigitalMessage) and content.platform in ("WHATSAPP", "EMAIL", "SMS"):
+                label, rule_id, probability, meta_desc = resolve_meta(
+                    "digital_written",
+                    "interp_digital_written",
+                    "Interpretation : Message digital = ecrit",
+                    0.78,
+                )
+                if rule_id not in existing_rule_ids:
+                    state.rules_registry.append(
                         Rule(
                             rule_id=rule_id,
                             type=RuleType.DYNAMIC,
                             description=meta_desc or "Un message digital est traite comme un ecrit pour la notification.",
                             python_snippet="def compute(msg):\\n    return msg.get('platform') in ['WHATSAPP','EMAIL','SMS']",
                         )
-                )
-                existing_rule_ids.add(rule_id)
-            target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
-            if not target_node_id:
-                interp_node = GraphNode(
-                    type=NodeType.RULE_APPLICATION,
-                    label=label,
-                    world_tag=WorldTag.SHARED,
-                    probability_score=probability,
-                    content={"type": "interpretation", "rule_id": rule_id},
-                )
-                state.graph.add_node(interp_node)
-                target_node_id = interp_node.node_id
-            if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
-                state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
-            created.append(label)
+                    )
+                    existing_rule_ids.add(rule_id)
+                target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
+                if not target_node_id:
+                    interp_node = GraphNode(
+                        type=NodeType.RULE_APPLICATION,
+                        label=label,
+                        world_tag=WorldTag.SHARED,
+                        probability_score=probability,
+                        content={"type": "interpretation", "rule_id": rule_id},
+                    )
+                    state.graph.add_node(interp_node)
+                    target_node_id = interp_node.node_id
+                if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
+                    state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
+                created.append(label)
 
-        ground_text = grounding.text_span.lower() if grounding and grounding.text_span else ""
-        doc_hint = (grounding.source_doc_id or "").lower() if grounding else ""
-        label_text = (node.label or "").lower()
-        if not competence_triggered and ("new york" in ground_text or "competence" in label_text or "newyork" in doc_hint):
-            competence_triggered = True
-            label, rule_id, probability, meta_desc = resolve_meta(
-                "clause_competence_ny",
-                "interp_competence_ny",
-                "Clause de competence internationale (NY)",
-                0.7,
-            )
-            target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
-            if not target_node_id:
-                interp_node = GraphNode(
-                    type=NodeType.RULE_APPLICATION,
-                    label=label,
-                    world_tag=WorldTag.SHARED,
-                    probability_score=probability,
-                    content={"type": "interpretation", "note": "Competence New York detectee", "rule_id": rule_id},
+            ground_text = grounding.text_span.lower() if grounding and grounding.text_span else ""
+            doc_hint = (grounding.source_doc_id or "").lower() if grounding else ""
+            label_text = (node.label or "").lower()
+            if not competence_triggered and ("new york" in ground_text or "competence" in label_text or "newyork" in doc_hint):
+                competence_triggered = True
+                label, rule_id, probability, meta_desc = resolve_meta(
+                    "clause_competence_ny",
+                    "interp_competence_ny",
+                    "Clause de competence internationale (NY)",
+                    0.7,
                 )
-                state.graph.add_node(interp_node)
-                target_node_id = interp_node.node_id
-            if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
-                state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
-            created.append(label)
-            self.request_replan(meta_desc or "Clause de competence New York detectee")
+                target_node_id = next((nid for nid, n in state.graph.nodes.items() if n.label == label), None)
+                if not target_node_id:
+                    interp_node = GraphNode(
+                        type=NodeType.RULE_APPLICATION,
+                        label=label,
+                        world_tag=WorldTag.SHARED,
+                        probability_score=probability,
+                        content={"type": "interpretation", "note": "Competence New York detectee", "rule_id": rule_id},
+                    )
+                    state.graph.add_node(interp_node)
+                    target_node_id = interp_node.node_id
+                if not edge_exists(node_id, target_node_id, EdgeType.INTERPRETS):
+                    state.graph.add_edge(node_id, target_node_id, EdgeType.INTERPRETS)
+                created.append(label)
+                self.request_replan(meta_desc or "Clause de competence New York detectee")
 
-    if created:
-        state.interpretations_applied = list(sorted(already_noted.union(created)))
-    return created
+        if created:
+            state.interpretations_applied = list(sorted(already_noted.union(created)))
+        return created
+
     def apply_alexy_balancing(self, state: SystemState) -> float:
         """
         Applique un balancier d'Alexy pour estimer le preavis raisonnable (multiverse A/B).
@@ -430,6 +430,7 @@ def generate_interpretations(self, state: SystemState) -> List[str]:
 
         state.interpretations_applied = list(sorted(set(state.interpretations_applied + [f"Alexy: {notice:.1f} mois"])))
         return notice
+
     def run_inference(self, state: SystemState, num_samples=1000) -> float:
         """
         Ex?cute une Inf?rence de Monte Carlo sur l'?tat actuel du graphe.
@@ -478,6 +479,7 @@ def generate_interpretations(self, state: SystemState) -> List[str]:
             print(f"[ERROR] Pyro Inference Error: {e}")
             state.entropy = 0.5
             return 0.5
+
     def _heuristic_entropy(self, context: Dict[str, Any]) -> float:
         """
         Approximation si Pyro n'est pas dispo : applique une forme de notice-gap + dependance.

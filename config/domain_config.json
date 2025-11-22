@@ -123,58 +123,42 @@
       }
     ]
   },
-  "planner": {
-    "tasks": [
-      {
-        "id": "t_check_prescription",
-        "action": "CHECK_LIMITATION_PERIOD",
-        "priority": 100,
-        "dependencies": [],
-        "description": "Defeater - prescription"
-      },
-      {
-        "id": "t_qualify_relationship",
-        "action": "QUALIFY_RELATIONSHIP",
-        "priority": 90,
-        "dependencies": [],
-        "description": "Qualifier la relation commerciale"
-      },
-      {
-        "id": "t_generate_interpretation",
-        "action": "GENERATE_INTERPRETATION",
-        "priority": 85,
-        "dependencies": [
-          "t_qualify_relationship"
-        ],
-        "description": "Injection des règles dynamiques"
-      },
-      {
-        "id": "t_apply_alexy",
-        "action": "APPLY_ALEXY_BALANCING",
-        "priority": 82,
-        "dependencies": [
-          "t_generate_interpretation"
-        ],
-        "description": "Calcul du préavis raisonnable"
-      },
-      {
-        "id": "t_calc_notice",
-        "action": "COMPUTE_NOTICE_GAP",
-        "priority": 80,
-        "dependencies": [
-          "t_apply_alexy"
-        ],
-        "description": "Comparer notice donné vs attendu"
-      },
-      {
-        "id": "t_check_fault",
-        "action": "VERIFY_GRAVE_FAULT",
-        "priority": 75,
-        "dependencies": [],
-        "description": "Vérifier les causes d'exonération"
-      }
-    ]
-  },
+"planner": {
+  "tasks": [
+    {
+      "id": "t_check_jurisdiction",
+      "action": "CHECK_COMPETENCE_JURISDICTION",
+      "priority": 110,
+      "description": "DEFEATER : Vérifier la compétence territoriale (Clause NY ?)"
+    },
+    {
+      "id": "t_check_prescription",
+      "action": "CHECK_LIMITATION_PERIOD",
+      "priority": 100,
+      "description": "DEFEATER : Vérifier la prescription (5 ans)"
+    },
+    {
+      "id": "t_qualify_relationship",
+      "action": "QUALIFY_RELATIONSHIP",
+      "priority": 90,
+      "dependencies": ["t_check_jurisdiction", "t_check_prescription"]
+    },
+    {
+      "id": "t_analyze_narrative_b",
+      "action": "ANALYZE_DEFENDANT_ARGUMENTS",
+      "priority": 85,
+      "dependencies": ["t_qualify_relationship"],
+      "description": "Analyser la thèse adverse (Faute Grave / Force Majeure)"
+    },
+    {
+      "id": "t_collapse_multiverse",
+      "action": "COLLAPSE_NARRATIVES",
+      "priority": 80,
+      "dependencies": ["t_analyze_narrative_b"],
+      "description": "Confronter les preuves pour éliminer un narratif"
+    }
+  ]
+},
   "interpretations": [
     {
       "key": "franco_tacite",

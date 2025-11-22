@@ -367,10 +367,28 @@ class GraphNode(BaseModel):
     
     # Contenu Sémantique (Polymorphisme)
     content: Union[
-        CommercialRelationship, ExtendedCommercialRelationship, RuptureEvent, GraveFaultEvent,
-        CorporateEntity, Contract, DigitalMessage, Evidence, LogisticsCondition, InvoiceEvidence, FinancialHistory,
-        RelationshipAttestation, NonSolicitationCommitment, PurchaseOrderEvidence, DamagesTable,
-        UnilateralModification, dict
+        CommercialRelationship,
+        ExtendedCommercialRelationship,
+        RuptureEvent,
+        RuptureContext,
+        BrutalityAssessment,
+        GraveFaultEvent,
+        MisconductEvent,
+        ForceMajeureClaim,
+        DamagesAssessment,
+        CorporateEntity,
+        Contract,
+        DigitalMessage,
+        Evidence,
+        LogisticsCondition,
+        InvoiceEvidence,
+        FinancialHistory,
+        RelationshipAttestation,
+        NonSolicitationCommitment,
+        PurchaseOrderEvidence,
+        DamagesTable,
+        UnilateralModification,
+        dict,
     ]
     
     grounding: Optional[Grounding] = None
@@ -443,7 +461,7 @@ class Task(BaseModel):
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     action: str # ex: "EXTRACT_DATE", "CHECK_JURISPRUDENCE"
     target_node_id: Optional[str] = None
-    priority: int = Field(50, ge=0, le=100) # 100 = Urgent/Defeater
+    priority: int = Field(50, ge=0, le=200) # 200 = Urgent/Defeater
     status: TaskStatus = TaskStatus.PENDING
     dependencies: List[str] = Field(default_factory=list) # Liste des task_ids requis avant exécution
 

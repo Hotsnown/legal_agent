@@ -13,12 +13,21 @@ from orchestrator import LegalOrchestrator, WorkflowState
 from system_state import SystemState
 from domain_config import load_domain_config
 
+# Dans server.py
+
+# ... imports ...
+
 app = FastAPI(title="Neuro-Symbolic Legal Engine API")
 
-# Autoriser React (localhost:3000)
+# MODIFICATION ICI : Remplacez ["*"] par l'adresse explicite de votre frontend
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,  # <--- Explicite au lieu de ["*"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

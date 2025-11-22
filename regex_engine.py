@@ -122,6 +122,94 @@ class RegexPerceptionEngine:
 
         self._finalize_relationship(state, source_doc_id=current_doc_id)
 
+    def _inject_demo_fault_event(self, state: SystemState):
+        """Crée le Monde B : Le fournisseur prétend qu'il y a eu des impayés."""
+        from system_state import MisconductEvent
+        
+        fault = MisconductEvent(
+            date_of_occurrence=datetime(2011, 5, 20),
+            date_of_discovery=datetime(2011, 6, 1),
+            type="NON_PAYMENT",
+            description="Retard de paiement facture F-2011-05",
+            was_previously_tolerated=False 
+        )
+        
+        node = GraphNode(
+            type=NodeType.FACT,
+            label="Allégation: Impayés répétés",
+            world_tag=WorldTag.NARRATIVE_B,  # <--- MONDE B (DÉFENDEUR)
+            probability_score=0.60,          # Incertain au début
+            content=fault,
+            grounding=Grounding(
+                source_doc_id="Email_Relance_2011.msg", # Fichier fictif pour la démo
+                page_number=1,
+                text_span="Nous constatons encore un retard de paiement ce mois-ci.", # <--- CE QUI SERA SURLIGNÉ
+                bbox=[100, 200, 500, 250] # Coordonnées fictives pour l'UI
+            )
+        )
+        state.graph.add_node(node)
+        # On lie ce fait au noeud "Rupture" via une relation "JUSTIFIES" (nouveau EdgeType ?)
+        # Pour l'instant on utilise CAUSES
+        # state.graph.add_edge(node.node_id, self.rupture_node_id, EdgeType.CAUSES)
+
+    def _inject_demo_clause_competence(self, state: SystemState):
+        """
+        Simule l'injection d'une clause de compétence (ex: New York) 
+        qui agit comme un Defeater potentiel (bloquant).
+        """
+        print("   -> [REGEX] Simulated extraction of NY Jurisdiction Clause.")
+        
+        # On importe les types nécessaires si ce n'est pas déjà fait en haut du fichier
+        # (Normalement déjà importés, mais par sécurité :)
+        from system_state import GraphNode, NodeType, WorldTag, Grounding
+
+        # Simulation d'une clause trouvée dans un document fictif ou existant
+        node = GraphNode(
+            type=NodeType.FACT,
+            label="Clause Compétence: New York",
+            world_tag=WorldTag.SHARED,
+            probability_score=0.6, # Incertitude initiale
+            content={
+                "type": "jurisdiction_clause",
+                "jurisdiction": "New York",
+                "text": "Toute contestation relative au présent accord sera soumise aux tribunaux de New York."
+            },
+            grounding=Grounding(
+                source_doc_id="Courrier_RBOUTIN_TI_2000-11-09_conditions_commerciales.docx", # On "ancre" cela sur un doc existant pour la démo
+                page_number=1,
+                text_span="Toute contestation sera soumise aux tribunaux de New York."
+            )
+        )
+        state.graph.add_node(node)
+
+    def _inject_demo_tolerance_evidence(self, state: SystemState):
+        """Le Twist : Un email prouve que ces retards étaient acceptés."""
+        
+        # 1. Créer la preuve
+        node = GraphNode(
+            type=NodeType.EVIDENCE,
+            label="Preuve: Email de Tolérance",
+            world_tag=WorldTag.SHARED, # Accepté par tous, c'est une preuve physique
+            probability_score=0.99,
+            content={"type": "email", "subject": "Pas de souci pour le délai"},
+            grounding=Grounding(
+                source_doc_id="Email_Accord_Finance.msg",
+                page_number=1,
+                text_span="Ne vous inquiétez pas pour le retard, on gère ça le mois prochain comme d'habitude."
+            )
+        )
+        state.graph.add_node(node)
+
+        # 2. Mise à jour immédiate du graphe (Simuler le Reasoning Engine ici pour la démo)
+        # On cherche le noeud de faute et on le marque comme "Toléré" ou on baisse sa proba
+        for n in state.graph.nodes.values():
+            if n.label == "Allégation: Impayés répétés":
+                n.probability_score = 0.05 # COLLAPSE DU MONDE B
+                n.world_tag = WorldTag.NARRATIVE_B # Reste tagué B pour montrer qu'il a perdu
+                # On peut ajouter un champ dans content pour expliquer
+                if hasattr(n.content, 'was_condoned'):
+                    n.content.was_condoned = True
+
     # ------------------------------------------------------------------ #
     # File helpers
     # ------------------------------------------------------------------ #
