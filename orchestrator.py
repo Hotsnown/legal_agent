@@ -12,13 +12,6 @@ from system_state import (
     RuleType,
     ExtendedCommercialRelationship,
     AlexyWeight,
-    RelationshipCharacteristics,
-    AnnualTurnover,
-    ProductType,
-    SectorVolatility,
-    NotificationMethod,
-    RuptureEvent,
-    DamagesAssessment,
     FinancialHistory,
     GraphNode,
     NodeType,
@@ -26,6 +19,7 @@ from system_state import (
     EdgeType,
     Grounding,
     EventType,
+    DamagesAssessment,
 )
 from regex_engine import RegexPerceptionEngine
 from reasoning_engine import ReasoningEngine
@@ -36,7 +30,6 @@ from domain_config import get_static_rules, get_domain_version, get_alexy_weight
 # ETATS ET SIGNAUX
 # ==============================================================================
 
-
 class WorkflowState(Enum):
     INIT = auto()
     PLANNING = auto()
@@ -45,28 +38,30 @@ class WorkflowState(Enum):
     INTERACTING = auto()
     VERDICT = auto()
 
-
 class OrchestratorSignal(Enum):
     CONTINUE = auto()
     WAIT = auto()
     STOP = auto()
 
-
 # ==============================================================================
 # L'ORCHESTRATEUR
 # ==============================================================================
 
-
 class LegalOrchestrator:
     """
     Système nerveux central : coordonne planification, perception et raisonnement.
+    Refactored: Stores history locally for polling instead of streaming.
     """
 
     def __init__(self, case_id: str, data_dir: str = "data"):
         self.case_id = case_id
         self.state_machine_status = WorkflowState.INIT
         self.data_dir = data_dir
-        self.event_queue: asyncio.Queue = asyncio.Queue()
+        
+        # CHANGED: Replaced Queue with a simple list for history
+        self.execution_history: List[Dict[str, Any]] = [] 
+        self.is_running: bool = False
+        
         self.system_state = SystemState(case_id=case_id)
 
         self.perception = RegexPerceptionEngine(emit_event=self._publish_event)
@@ -97,22 +92,20 @@ class LegalOrchestrator:
                 print(f"[WARN] Alexy weight skipped: {exc}")
 
     def _publish_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Central method to record events. 
+        Now appends to self.execution_history instead of putting into a queue.
+        """
         event = {
             "type": event_type,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "payload": payload or {},
         }
-        try:
-            self.event_queue.put_nowait(event)
-        except Exception:
-            pass
+        self.execution_history.append(event)
         return event
 
     def _get_pending_question(self):
         return getattr(self, "pending_question", "Question générique ?")
-
-    def _legacy_run_step(self, user_input: Optional[Dict] = None) -> Dict[str, Any]:
-        return {"status": "STREAM_MODE_ONLY", "state": self.state_machine_status.name}
 
     # --- HELPERS DE PERSISTANCE ---
 
@@ -132,12 +125,10 @@ class LegalOrchestrator:
             grounding_obj = None
             if payload.get("grounding"):
                 g_data = payload["grounding"]
-                if "source_doc_id" not in g_data:
-                    g_data["source_doc_id"] = "unknown_doc"
-                if "page_number" not in g_data:
-                    g_data["page_number"] = 1
-                if "text_span" not in g_data:
-                    g_data["text_span"] = "..."
+                # Defaults for safety
+                g_data.setdefault("source_doc_id", "unknown_doc")
+                g_data.setdefault("page_number", 1)
+                g_data.setdefault("text_span", "...")
                 try:
                     grounding_obj = Grounding(**g_data)
                 except Exception as e:
@@ -178,9 +169,8 @@ class LegalOrchestrator:
             print(f"[ERROR] Edge persistence failed: {e}")
 
     # ==================================================================
-    # MODE STREAMING DEMO (GAME LOOP)
+    # ESTIMATIONS
     # ==================================================================
-
     def _estimate_financials(self) -> Dict[str, float]:
         """Approxime les données financières pour le calcul du préjudice."""
         avg_annual = None
@@ -207,16 +197,24 @@ class LegalOrchestrator:
 
         return {"avg_monthly_ca": avg_annual / 12.0, "margin_rate": margin_rate, "mitigation": mitigation}
 
-    async def stream_analysis(self, user_input: Optional[Dict] = None):
+    # ==================================================================
+    # BACKGROUND EXECUTION
+    # ==================================================================
+
+    async def run_analysis_background(self):
         """
-        Game loop streaming demo :
-        1) Plan -> 2) Ingestion -> 3) Ambiguity -> 4) Uncertainty -> 5) Alexy -> 6) Verdict.
+        Runs the analysis logic. 
+        NO YIELD. Updates internal state and history list via _publish_event.
         """
+        if self.is_running:
+            print("Analysis already running.")
+            return
+        
+        self.is_running = True
+        self.execution_history = [] # Clear old history on new run
         state = self.system_state
 
-        def evt(event_type: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-            return {"type": event_type, "payload": payload or {}}
-
+        # Helper to replace the previous 'serialize_task' local function
         def serialize_task(task: Task) -> Dict[str, Any]:
             return {
                 "id": task.task_id,
@@ -226,9 +224,10 @@ class LegalOrchestrator:
                 "status": task.status,
             }
 
-        def append_log(task: Task, message: str) -> Dict[str, Any]:
+        # Helper to replace 'append_log' local function
+        def log_update(task: Task, message: str):
             task.logs.append(message)
-            return evt(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "log": message})
+            self._publish_event(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "log": message})
 
         def fallback_plan() -> List[Task]:
             return [
@@ -246,23 +245,26 @@ class LegalOrchestrator:
                 plan = fallback_plan()
             state.plan_queue = plan
 
-            yield evt(EventType.PLAN_GEN.value, {"tasks": [serialize_task(t) for t in plan]})
-            yield evt("LOG", {"message": "Initial Strategy Formulated: 5 Steps detected."})
+            self._publish_event(EventType.PLAN_GEN.value, {"tasks": [serialize_task(t) for t in plan]})
+            self._publish_event("LOG", {"message": "Initial Strategy Formulated: 5 Steps detected."})
+            
             await asyncio.sleep(0.25)
 
             for task in plan:
                 task.status = TaskStatus.IN_PROGRESS
-                yield evt(EventType.TASK_START.value, {"task_id": task.task_id})
+                self._publish_event(EventType.TASK_START.value, {"task_id": task.task_id})
                 await asyncio.sleep(0.1)
 
                 if task.task_id == "t_ingest":
-                    yield append_log(task, "Scanning data directory...")
+                    log_update(task, "Scanning data directory...")
                     await asyncio.sleep(0.2)
                     self.perception.ingest_directory("data", state)
+                    
+                    # Simulate progress updates
                     updates = 3 if state.graph.nodes else 1
                     for idx in range(updates):
                         await asyncio.sleep(0.5)
-                        yield evt(
+                        self._publish_event(
                             EventType.GRAPH_UPDATE.value,
                             {
                                 "task_id": task.task_id,
@@ -271,24 +273,27 @@ class LegalOrchestrator:
                                 "progress": round((idx + 1) / updates, 2),
                             },
                         )
-                    yield append_log(task, "Indexation complete. 15 Documents processed.")
+                    log_update(task, "Indexation complete. 15 Documents processed.")
 
                 elif task.task_id == "t_interpret":
-                    yield append_log(task, "Analyzing clauses...")
+                    log_update(task, "Analyzing clauses...")
                     await asyncio.sleep(0.2)
                     interp_result = {}
                     simulate_fn = getattr(self.reasoner, "simulate_interpretation_gap", None)
                     if callable(simulate_fn):
                         interp_result = simulate_fn(state) or {}
+                    
                     generated_code = None
                     if isinstance(interp_result, dict):
                         generated_code = interp_result.get("generated_code") or interp_result.get("code")
                     if not generated_code:
                         generated_code = "# Patch: ignore NY clause\nreturn False"
-                    yield evt(EventType.INTERPRETATION_REQ.value, {"task_id": task.task_id, "generated_code": generated_code})
-                    yield append_log(task, "Ambiguity detected (NY Clause). Generating Patch...")
+                        
+                    self._publish_event(EventType.INTERPRETATION_REQ.value, {"task_id": task.task_id, "generated_code": generated_code})
+                    log_update(task, "Ambiguity detected (NY Clause). Generating Patch...")
                     await asyncio.sleep(2.0)
-                    yield append_log(task, "Patch Applied: Clause deemed inapplicable.")
+                    log_update(task, "Patch Applied: Clause deemed inapplicable.")
+                    
                     patch_node = GraphNode(
                         node_id=f"rule_patch_{uuid.uuid4().hex[:8]}",
                         type=NodeType.RULE_APPLICATION,
@@ -298,28 +303,32 @@ class LegalOrchestrator:
                         content={"type": "interpretation_patch", "generated_code": generated_code},
                     )
                     state.graph.add_node(patch_node)
-                    yield evt(
+                    self._publish_event(
                         EventType.GRAPH_UPDATE.value,
                         {"task_id": task.task_id, "node": patch_node.model_dump()},
                     )
 
                 elif task.task_id == "t_conflict":
-                    yield append_log(task, "Cross-referencing facts...")
+                    log_update(task, "Cross-referencing facts...")
                     await asyncio.sleep(0.2)
                     conflict_result = {}
                     simulate_fn = getattr(self.reasoner, "simulate_uncertainty_resolution", None)
                     if callable(simulate_fn):
                         conflict_result = simulate_fn(state) or {}
+                    
                     question = None
                     if isinstance(conflict_result, dict):
                         question = conflict_result.get("question")
                     question = question or "Cette date a-t-elle été confirmée par e-mail ?"
-                    yield evt(EventType.UNCERTAINTY_REQ.value, {"task_id": task.task_id, "question": question})
+                    
+                    self._publish_event(EventType.UNCERTAINTY_REQ.value, {"task_id": task.task_id, "question": question})
                     await asyncio.sleep(2.0)
+                    
                     user_artifact = {"type": "USER_REPLY", "content": "Oui, confirmé par email."}
                     task.artifacts.append(user_artifact)
-                    yield evt(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "artifact": user_artifact})
-                    yield append_log(task, "New Evidence Injected. Probability updated.")
+                    self._publish_event(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "artifact": user_artifact})
+                    log_update(task, "New Evidence Injected. Probability updated.")
+                    
                     evidence_node = GraphNode(
                         node_id=f"evidence_{uuid.uuid4().hex[:8]}",
                         type=NodeType.EVIDENCE,
@@ -329,7 +338,7 @@ class LegalOrchestrator:
                         content={"type": "email_confirmation", "answer": user_artifact["content"]},
                     )
                     state.graph.add_node(evidence_node)
-                    yield evt(
+                    self._publish_event(
                         EventType.GRAPH_UPDATE.value,
                         {
                             "task_id": task.task_id,
@@ -339,7 +348,7 @@ class LegalOrchestrator:
                     )
 
                 elif task.task_id == "t_alexy":
-                    yield append_log(task, "Calculating reasonable notice...")
+                    log_update(task, "Calculating reasonable notice...")
                     await asyncio.sleep(0.2)
                     simulate_fn = getattr(self.reasoner, "simulate_alexy_steps", None)
                     steps = simulate_fn(state) if callable(simulate_fn) else []
@@ -353,10 +362,12 @@ class LegalOrchestrator:
                     for step in steps:
                         label = step.get("label", "Step")
                         task.logs.append(label)
-                        yield evt(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "log": label})
+                        self._publish_event(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "log": label})
+                        
                         payload = dict(step)
                         payload["task_id"] = task.task_id
-                        yield evt("WEIGHT_UPDATE", payload)
+                        self._publish_event("WEIGHT_UPDATE", payload)
+                        
                         last_total = step.get("total") or step.get("running_total")
                         await asyncio.sleep(1.0)
                     if last_total is not None:
@@ -378,20 +389,15 @@ class LegalOrchestrator:
                         "estimated_damages_eur": round(damages, 2),
                         "explanation": "Alexy balancing complete. Uncertainty resolved and ambiguity patched.",
                     }
-                    yield evt("VERDICT", verdict_payload)
+                    self._publish_event("VERDICT", verdict_payload)
 
                 task.status = TaskStatus.COMPLETED
-                yield evt(EventType.TASK_COMPLETE.value, {"task_id": task.task_id})
+                self._publish_event(EventType.TASK_COMPLETE.value, {"task_id": task.task_id})
                 await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
-            return
-
-
-if __name__ == "__main__":
-    async def run():
-        orchestrator = LegalOrchestrator("TEST")
-        async for event in orchestrator.stream_analysis():
-            print(event)
-
-    asyncio.run(run())
+            print("Analysis cancelled.")
+        finally:
+            self.is_running = False
+            # Optional: Emit a final DONE event
+            self._publish_event("STREAM_END", {})
