@@ -122,36 +122,6 @@ class RegexPerceptionEngine:
 
         self._finalize_relationship(state, source_doc_id=current_doc_id)
 
-    def _inject_demo_fault_event(self, state: SystemState):
-        """Crée le Monde B : Le fournisseur prétend qu'il y a eu des impayés."""
-        from system_state import MisconductEvent
-        
-        fault = MisconductEvent(
-            date_of_occurrence=datetime(2011, 5, 20),
-            date_of_discovery=datetime(2011, 6, 1),
-            type="NON_PAYMENT",
-            description="Retard de paiement facture F-2011-05",
-            was_previously_tolerated=False 
-        )
-        
-        node = GraphNode(
-            type=NodeType.FACT,
-            label="Allégation: Impayés répétés",
-            world_tag=WorldTag.NARRATIVE_B,  # <--- MONDE B (DÉFENDEUR)
-            probability_score=0.60,          # Incertain au début
-            content=fault,
-            grounding=Grounding(
-                source_doc_id="Email_Relance_2011.msg", # Fichier fictif pour la démo
-                page_number=1,
-                text_span="Nous constatons encore un retard de paiement ce mois-ci.", # <--- CE QUI SERA SURLIGNÉ
-                bbox=[100, 200, 500, 250] # Coordonnées fictives pour l'UI
-            )
-        )
-        state.graph.add_node(node)
-        # On lie ce fait au noeud "Rupture" via une relation "JUSTIFIES" (nouveau EdgeType ?)
-        # Pour l'instant on utilise CAUSES
-        # state.graph.add_edge(node.node_id, self.rupture_node_id, EdgeType.CAUSES)
-
     def _inject_demo_clause_competence(self, state: SystemState):
         """
         Simule l'injection d'une clause de compétence (ex: New York) 
@@ -182,23 +152,95 @@ class RegexPerceptionEngine:
         )
         state.graph.add_node(node)
 
-    def _inject_demo_tolerance_evidence(self, state: SystemState):
-        """Le Twist : Un email prouve que ces retards étaient acceptés."""
+    def _inject_demo_fault_event(self, state: SystemState):
+        """
+        STEP 3 : L'attaque.
+        Crée le Monde B (Faute) et le LIE au concept de Rupture pour créer une tension visuelle.
+        """
+        from system_state import MisconductEvent, EdgeType # Import EdgeType
+
+        # 1. Création du fait (Nœud Rouge)
+        fault = MisconductEvent(
+            date_of_occurrence=datetime(2011, 5, 20),
+            date_of_discovery=datetime(2011, 6, 1),
+            type="NON_PAYMENT",
+            description="Retard de paiement facture F-2011-05",
+            was_previously_tolerated=False 
+        )
         
-        # 1. Créer la preuve
+        fault_node_id = "demo_node_fault_impayes" # ID fixe pour pouvoir le retrouver plus tard
+        
         node = GraphNode(
+            node_id=fault_node_id, # On fixe l'ID
+            type=NodeType.FACT,
+            label="Allégation: Impayés répétés",
+            world_tag=WorldTag.NARRATIVE_B,  # MONDE B (ROUGE)
+            probability_score=0.60,
+            content=fault,
+            grounding=Grounding(
+                source_doc_id="Email_Relance_2011.msg",
+                page_number=1,
+                text_span="Nous constatons encore un retard de paiement ce mois-ci."
+            )
+        )
+        state.graph.add_node(node)
+        
+        # 2. CRÉATION DU LIEN (DYNAMIQUE)
+        # On relie cette faute au noeud "Rupture Brutale" pour dire "Ceci JUSTIFIE cela"
+        # On cherche le noeud pivot créé par _synthesize_edges
+        target_id = "reason_rupture_brutale" 
+        
+        # Si le noeud n'existe pas encore (si on n'a pas fait _synthesize), on le crée à la volée
+        if target_id not in state.graph.nodes:
+             self._get_or_create_reason_node(state, target_id, "Rupture Brutale", 0.5)
+
+        state.graph.add_edge(node.node_id, target_id, EdgeType.CAUSES)
+        print(f"   -> [GRAPH] New Edge: {node.label} --[CAUSES]--> Rupture Brutale")
+
+
+    def _inject_demo_tolerance_evidence(self, state: SystemState):
+        """
+        STEP 5 : Le Twist (Collapse).
+        Une preuve apparaît et TUE le narratif B.
+        """
+        from system_state import EdgeType
+
+        # 1. Création de la preuve (Nœud Vert/Bleu)
+        evidence_id = "demo_node_evidence_tolerance"
+        
+        node = GraphNode(
+            node_id=evidence_id,
             type=NodeType.EVIDENCE,
             label="Preuve: Email de Tolérance",
-            world_tag=WorldTag.SHARED, # Accepté par tous, c'est une preuve physique
+            world_tag=WorldTag.SHARED,
             probability_score=0.99,
             content={"type": "email", "subject": "Pas de souci pour le délai"},
             grounding=Grounding(
                 source_doc_id="Email_Accord_Finance.msg",
                 page_number=1,
-                text_span="Ne vous inquiétez pas pour le retard, on gère ça le mois prochain comme d'habitude."
+                text_span="Ne vous inquiétez pas pour le retard, on gère ça le mois prochain."
             )
         )
         state.graph.add_node(node)
+
+        # 2. CRÉATION DU LIEN DE CONTRADICTION
+        # Cette preuve ATTAQUE le noeud de faute.
+        target_fault_id = "demo_node_fault_impayes"
+        
+        if target_fault_id in state.graph.nodes:
+            state.graph.add_edge(node.node_id, target_fault_id, EdgeType.CONTRADICTS)
+            print(f"   -> [GRAPH] New Edge: {node.label} --[CONTRADICTS]--> Allégation Impayés")
+
+            # 3. LE COLLAPSE (Mise à jour immédiate des probabilités)
+            # Dans un vrai système, c'est le ReasoningEngine qui ferait ça au Step suivant.
+            # Pour la démo visuelle instantanée, on le fait ici.
+            fault_node = state.graph.nodes[target_fault_id]
+            fault_node.probability_score = 0.05 # Le noeud devient transparent/fantôme
+            fault_node.label += " (REJETÉ)"     # Feedback textuel immédiat
+            
+            # On renforce le narratif A (Rupture Brutale) car l'excuse est tombée
+            if "reason_rupture_brutale" in state.graph.nodes:
+                state.graph.nodes["reason_rupture_brutale"].probability_score = 0.95
 
         # 2. Mise à jour immédiate du graphe (Simuler le Reasoning Engine ici pour la démo)
         # On cherche le noeud de faute et on le marque comme "Toléré" ou on baisse sa proba
