@@ -2,7 +2,7 @@ import math
 import torch
 import networkx as nx
 import uuid
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
 
 # Nous importons Pyro pour la modÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©lisation probabiliste
 # (Dans un environnement rÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©el, pip install pyro-ppl torch)
@@ -157,11 +157,19 @@ class PyroLegalModel:
         return final_verdict
 
 class ReasoningEngine:
-    def __init__(self):
+    def __init__(self, emit_event: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None):
         self.planner = StrategicPlanner()
         self.model = PyroLegalModel()
         self.pending_replan_reason: Optional[str] = None
         self.interpretation_templates = {tpl.get("key"): tpl for tpl in get_interpretation_templates()}
+        self.emit_event = emit_event
+
+    def _emit(self, event_type: str, payload: Optional[Dict[str, Any]] = None):
+        if self.emit_event:
+            try:
+                self.emit_event(event_type, payload or {})
+            except Exception:
+                pass
 
     def plan_strategy(self, state: SystemState):
         """Appelle le Planner et remplit la queue du State."""
@@ -437,6 +445,17 @@ class ReasoningEngine:
         Retourne l'entropie du verdict.
         """
         print("--- [REASONING] Running Probabilistic Inference (Pyro) ---")
+
+        def emit_progress(probability: float, stage: str = "INFERENCE", note: str = ""):
+            self._emit(
+                "PROBABILITY_UPDATE",
+                {
+                    "probability": float(probability),
+                    "stage": stage,
+                    "note": note or "Actualisation du verdict",
+                },
+            )
+
         # 1. Extraction des Donn?es
         context = self._extract_priors_from_graph(state)
         dep_mean = context["dep_alpha"] / (context["dep_alpha"] + context["dep_beta"])
@@ -446,9 +465,13 @@ class ReasoningEngine:
         )
         if context.get("alexy_notice_months"):
             print(f"   -> Alexy override notice: {context['alexy_notice_months']:.2f}m")
+        emit_progress(0.5, note="Initialisation de la jauge")
         if pyro is None:
             print("   -> [SIMULATION] Pyro not available. Falling back to heuristic inference.")
-            entropy = self._heuristic_entropy(context)
+            liability = self._heuristic_liability(context)
+            for alpha in (0.25, 0.5, 0.75, 1.0):
+                emit_progress(0.5 + (liability - 0.5) * alpha, note="Heuristique en cours")
+            entropy = self._heuristic_entropy_from_liability(liability)
             state.entropy = entropy
             print(f"   -> Heuristic entropy: {entropy:.3f}")
             return entropy
@@ -474,13 +497,15 @@ class ReasoningEngine:
             entropy = - (p * math.log(p) + (1 - p) * math.log(1 - p))
             state.entropy = entropy
             print(f"   -> System Entropy: {entropy:.4f}")
+            for alpha in (0.25, 0.5, 0.75, 1.0):
+                emit_progress(0.5 + (p - 0.5) * alpha, note="Inference Pyro")
             return entropy
         except Exception as e:
             print(f"[ERROR] Pyro Inference Error: {e}")
             state.entropy = 0.5
             return 0.5
 
-    def _heuristic_entropy(self, context: Dict[str, Any]) -> float:
+    def _heuristic_liability(self, context: Dict[str, Any]) -> float:
         """
         Approximation si Pyro n'est pas dispo : applique une forme de notice-gap + dependance.
         """
@@ -491,6 +516,9 @@ class ReasoningEngine:
         notice_gap = max(0.0, target_notice - context["actual_notice_months"])
         gap_ratio = notice_gap / target_notice if target_notice else 0.0
         liability = gap_ratio * context["p_established"] * (1 - context["p_grave_fault"])
+        return max(0.001, min(0.999, liability))
+
+    def _heuristic_entropy_from_liability(self, liability: float) -> float:
         liability = max(0.001, min(0.999, liability))
         return - (liability * math.log(liability) + (1 - liability) * math.log(1 - liability))
 

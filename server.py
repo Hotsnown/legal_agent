@@ -1,5 +1,6 @@
 # server.py
 import uuid
+import json
 from typing import Dict, Optional
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
 # Import de nos modules précédents
 from orchestrator import LegalOrchestrator, WorkflowState
@@ -71,7 +73,7 @@ def run_step(case_id: str):
     orchestrator = ACTIVE_CASES[case_id]
     
     # On exécute un pas de la Machine à États
-    result = orchestrator.run_step()
+    result = orchestrator._legacy_run_step()
     
     # On formate la réponse pour l'UI
     response = {
@@ -93,8 +95,21 @@ def run_step(case_id: str):
     # Si verdict, on renvoie la décision
     if result.get("final_state") == "VERDICT":
         response["verdict"] = result
-        
+    
     return response
+
+@app.get("/cases/{case_id}/stream")
+async def stream_case(case_id: str):
+    """Streaming SSE des micro-�v�nements du raisonnement."""
+    if case_id not in ACTIVE_CASES:
+        raise HTTPException(status_code=404, detail="Case not found")
+    orchestrator = ACTIVE_CASES[case_id]
+
+    async def event_generator():
+        async for event in orchestrator.stream_analysis():
+            yield {"data": json.dumps(event)}
+
+    return EventSourceResponse(event_generator())
 
 @app.post("/cases/{case_id}/reply")
 def reply_to_system(case_id: str, reply: UserReplyRequest):
@@ -110,7 +125,7 @@ def reply_to_system(case_id: str, reply: UserReplyRequest):
     
     # On injecte la réponse
     # Note: run_step gère l'input utilisateur s'il est fourni
-    result = orchestrator.run_step(user_input={"answer": reply.answer})
+    result = orchestrator._legacy_run_step(user_input={"answer": reply.answer})
     
     return {"status": "Reply processed", "next_state": orchestrator.state_machine_status.name}
 

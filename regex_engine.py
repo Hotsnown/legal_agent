@@ -4,7 +4,7 @@ import re
 import unicodedata
 import zipfile
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 from system_state import (
     SystemState,
@@ -35,7 +35,7 @@ class RegexPerceptionEngine:
     S'appuie sur les fichiers ./data (docx/csv) pour remplir le graphe.
     """
 
-    def __init__(self):
+    def __init__(self, emit_event: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None):
         self.financial_cache: Dict[int, float] = {}
         self.exclusive_flag: bool = False
         self.margin_rate_hint: Optional[float] = None
@@ -46,6 +46,46 @@ class RegexPerceptionEngine:
         self._data_dir_root: Optional[str] = None
         self._last_doc_id: Optional[str] = None
         self._demo_nodes_injected: bool = False
+        self.emit_event = emit_event
+
+    # ------------------------------------------------------------------ #
+    # Event helpers
+    # ------------------------------------------------------------------ #
+    def _emit(self, event_type: str, payload: Optional[Dict[str, Any]] = None):
+        if self.emit_event:
+            try:
+                self.emit_event(event_type, payload or {})
+            except Exception:
+                # Keep extraction robust if the UI listener drops.
+                pass
+
+    def _register_node(self, state: SystemState, node: GraphNode, snippet: Optional[str] = None):
+        state.graph.add_node(node)
+        snippet_text = snippet or (node.grounding.text_span if node.grounding else None)
+        self._emit(
+            "NODE_ADDED",
+            {
+                "id": node.node_id,
+                "label": node.label,
+                "type": node.type.value if hasattr(node.type, 'value') else node.type,
+                "world_tag": node.world_tag.value if hasattr(node.world_tag, 'value') else node.world_tag,
+                "probability": node.probability_score,
+                "snippet": snippet_text,
+                "source": node.grounding.source_doc_id if node.grounding else None,
+            },
+        )
+        return node.node_id
+
+    def _register_edge(self, state: SystemState, source: str, target: str, etype: EdgeType):
+        state.graph.add_edge(source, target, etype)
+        self._emit(
+            "EDGE_ADDED",
+            {
+                "source": source,
+                "target": target,
+                "type": etype.value if hasattr(etype, 'value') else etype,
+            },
+        )
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -150,7 +190,15 @@ class RegexPerceptionEngine:
                 text_span="Toute contestation sera soumise aux tribunaux de New York."
             )
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
+        self._emit(
+            "ALERT_DEFEATER",
+            {
+                "id": node.node_id,
+                "label": node.label,
+                "reason": "Clause de competence internationale detectee",
+            },
+        )
 
     def _inject_demo_fault_event(self, state: SystemState):
         """
@@ -183,7 +231,16 @@ class RegexPerceptionEngine:
                 text_span="Nous constatons encore un retard de paiement ce mois-ci."
             )
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
+        self._emit(
+            "NARRATIVE_EMERGENCE",
+            {
+                "id": node.node_id,
+                "label": node.label,
+                "world_tag": node.world_tag.value if hasattr(node.world_tag, "value") else node.world_tag,
+                "message": "Narratif B (Faute grave) detecte",
+            },
+        )
         
         # 2. CRÉATION DU LIEN (DYNAMIQUE)
         # On relie cette faute au noeud "Rupture Brutale" pour dire "Ceci JUSTIFIE cela"
@@ -194,7 +251,7 @@ class RegexPerceptionEngine:
         if target_id not in state.graph.nodes:
              self._get_or_create_reason_node(state, target_id, "Rupture Brutale", 0.5)
 
-        state.graph.add_edge(node.node_id, target_id, EdgeType.CAUSES)
+        self._register_edge(state, node.node_id, target_id, EdgeType.CAUSES)
         print(f"   -> [GRAPH] New Edge: {node.label} --[CAUSES]--> Rupture Brutale")
 
 
@@ -221,14 +278,22 @@ class RegexPerceptionEngine:
                 text_span="Ne vous inquiétez pas pour le retard, on gère ça le mois prochain."
             )
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
 
         # 2. CRÉATION DU LIEN DE CONTRADICTION
         # Cette preuve ATTAQUE le noeud de faute.
         target_fault_id = "demo_node_fault_impayes"
         
         if target_fault_id in state.graph.nodes:
-            state.graph.add_edge(node.node_id, target_fault_id, EdgeType.CONTRADICTS)
+            self._register_edge(state, node.node_id, target_fault_id, EdgeType.CONTRADICTS)
+            self._emit(
+                "COLLAPSE_TRIGGER",
+                {
+                    "evidence_id": node.node_id,
+                    "target_id": target_fault_id,
+                    "edge_type": EdgeType.CONTRADICTS.value if hasattr(EdgeType.CONTRADICTS, "value") else EdgeType.CONTRADICTS,
+                },
+            )
             print(f"   -> [GRAPH] New Edge: {node.label} --[CONTRADICTS]--> Allégation Impayés")
 
             # 3. LE COLLAPSE (Mise à jour immédiate des probabilités)
@@ -242,6 +307,14 @@ class RegexPerceptionEngine:
             if "reason_rupture_brutale" in state.graph.nodes:
                 state.graph.nodes["reason_rupture_brutale"].probability_score = 0.95
 
+            self._emit(
+                "NARRATIVE_COLLAPSE",
+                {
+                    "collapsed_id": target_fault_id,
+                    "rescued_by": node.node_id,
+                    "message": "Preuve de tolerance neutralise la faute grave",
+                },
+            )
         # 2. Mise à jour immédiate du graphe (Simuler le Reasoning Engine ici pour la démo)
         # On cherche le noeud de faute et on le marque comme "Toléré" ou on baisse sa proba
         for n in state.graph.nodes.values():
@@ -320,7 +393,7 @@ class RegexPerceptionEngine:
                 "description": description,
             },
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         return node_id
 
     def _normalize(self, text: str) -> str:
@@ -381,7 +454,7 @@ class RegexPerceptionEngine:
                 text_span=threshold_match.group(0) if threshold_match else "",
             ),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print(f"  -> Franco detected at {threshold} EUR (renewal={renewal_flag})")
 
     def _process_invoice(self, doc_id: str, raw_text: str, normalized: str, state: SystemState):
@@ -413,7 +486,7 @@ class RegexPerceptionEngine:
                 text_span=amount_match.group(0),
             ),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print(f"  -> Invoice {invoice.invoice_number} captured (HT {invoice.amount_ht})")
 
     def _process_financial_table(self, doc_id: str, normalized: str, state: SystemState):
@@ -482,7 +555,7 @@ class RegexPerceptionEngine:
             content=table,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="tableau preavis/pertes"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print(f"  -> Damages table parsed ({len(scenarios)} scenarios)")
 
     def _process_attestation_vivion(self, doc_id: str, raw_text: str, normalized: str, state: SystemState):
@@ -513,7 +586,7 @@ class RegexPerceptionEngine:
             content=attestation,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="Relations et volumes 2007-2011"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print("  -> Relationship attestation ingested.")
 
     def _process_attestation_margin(self, doc_id: str, raw_text: str, normalized: str, state: SystemState):
@@ -535,7 +608,7 @@ class RegexPerceptionEngine:
             content=attestation,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="ATTESTATION D'EXPERT-COMPTABLE"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print("  -> Margin attestation captured.")
 
     def _process_attestation_papon(self, doc_id: str, raw_text: str, normalized: str, state: SystemState):
@@ -565,7 +638,7 @@ class RegexPerceptionEngine:
             content=attestation,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="Attestation EC CA TFVM"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         # Favorise l'etablissement de la relation et une dependance renforcee
         self.relationship_bounds[0] = min(filter(None, [self.relationship_bounds[0], start_year]), default=start_year)
         self.relationship_bounds[1] = max(filter(None, [self.relationship_bounds[1], end_year]), default=end_year)
@@ -587,7 +660,7 @@ class RegexPerceptionEngine:
             content=commit,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="non-prospection"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print("  -> Non-prospection commitment detected (exclusivity flag on).")
 
     def _process_purchase_order(self, doc_id: str, raw_text: str, normalized: str, state: SystemState):
@@ -616,7 +689,7 @@ class RegexPerceptionEngine:
             content=order,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="Commande n"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         print(f"  -> Purchase order {order.order_number} ingested.")
 
     def _process_modification_concessions(self, doc_id: str, raw_text: str, normalized: str, state: SystemState):
@@ -639,7 +712,7 @@ class RegexPerceptionEngine:
             content=modification,
             grounding=Grounding(source_doc_id=doc_id, page_number=1, text_span="concessions / conditions de franco"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         # Modif unilaterale suggere un preavis non respecte -> favorise la dependance
         self.exclusive_flag = True
         print("  -> Unilateral modification (concessions franco) captured.")
@@ -672,7 +745,7 @@ class RegexPerceptionEngine:
             content=entity,
             grounding=Grounding(source_doc_id=source_doc_id, page_number=1, text_span="Kbis"),
         )
-        state.graph.add_node(node)
+        self._register_node(state, node)
         self.company_nodes[name] = node.node_id
         print(f"  -> Company {name} (SIREN {siren}) added.")
 
@@ -717,7 +790,7 @@ class RegexPerceptionEngine:
                 content=fin_history,
                 grounding=Grounding(source_doc_id=source_doc_id, page_number=1, text_span="Extrait du CA"),
             )
-            state.graph.add_node(node)
+            self._register_node(state, node)
 
     def _upsert_extended_relationship(self, state: SystemState, fin_history: FinancialHistory, source_doc_id: str):
         start_year = years_min = min(item["year"] for item in fin_history.data_points)
@@ -771,7 +844,7 @@ class RegexPerceptionEngine:
                 content=relationship,
                 grounding=Grounding(source_doc_id=source_doc_id, page_number=1, text_span="Historique CA"),
             )
-            state.graph.add_node(node)
+            self._register_node(state, node)
         self.relationship_node_id = node.node_id
 
     def _inject_demo_nodes(self, state: SystemState):
@@ -802,7 +875,7 @@ class RegexPerceptionEngine:
                 text_span="Je confirme par WhatsApp que la relation s'arrêtera fin août.",
             ),
         )
-        state.graph.add_node(whatsapp_node)
+        self._register_node(state, whatsapp_node)
 
         # 2. Clause de compétence internationale (New York) -> force replan
         clause_node = GraphNode(
@@ -820,7 +893,7 @@ class RegexPerceptionEngine:
                 text_span="Les parties conviennent de la compétence exclusive des tribunaux de New York.",
             ),
         )
-        state.graph.add_node(clause_node)
+        self._register_node(state, clause_node)
     def _synthesize_edges(self, state: SystemState):
         """
         Cr��e des liens PROVES/CAUSES basiques pour visualiser le graphe m��me
@@ -841,7 +914,7 @@ class RegexPerceptionEngine:
             elif node.type == NodeType.FACT:
                 etype = EdgeType.CAUSES
             if etype and (node_id, root_id, etype) not in self._edges_added:
-                state.graph.add_edge(node_id, root_id, etype)
+                self._register_edge(state, node_id, root_id, etype)
                 self._edges_added.add((node_id, root_id, etype))
 
         # --- Cha�ne de raisonnement interm�diaire vers "Responsabilit� ?" ---
@@ -871,7 +944,7 @@ class RegexPerceptionEngine:
             key = (src, tgt, etype)
             if key in self._edges_added:
                 return
-            state.graph.add_edge(src, tgt, etype)
+            self._register_edge(state, src, tgt, etype)
             self._edges_added.add(key)
 
         # Faits/preuves soutenant la relation �tablie
@@ -932,3 +1005,7 @@ if __name__ == "__main__":
             print(f"[LOGISTICS] {node.content.condition_name} threshold={node.content.threshold_amount}")
         if isinstance(node.content, DamagesTable):
             print(f"[DAMAGES] {len(node.content.scenarios)} scenarios loaded")
+
+
+
+
