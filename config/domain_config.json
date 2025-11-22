@@ -1,0 +1,208 @@
+{
+  "version": "1.0.0",
+  "name": "Rupture Brutale des Relations Commerciales",
+  "ontology": {
+    "entities": [
+      {
+        "name": "CorporateEntity",
+        "category": "ACTOR",
+        "description": "Société commerciale (Client/Fournisseur)",
+        "key_fields": [
+          "name",
+          "role",
+          "sector",
+          "turnover_last_year"
+        ]
+      },
+      {
+        "name": "ExtendedCommercialRelationship",
+        "category": "CONCEPT",
+        "description": "Relation commerciale établie (durée, flux, dépendance)",
+        "key_fields": [
+          "start_date",
+          "financial_history",
+          "dependency_rate",
+          "characteristics"
+        ]
+      },
+      {
+        "name": "RuptureContext",
+        "category": "EVENT",
+        "description": "Notification + exécution de la rupture",
+        "key_fields": [
+          "notification_date",
+          "effective_end_date",
+          "mechanics",
+          "executed_notice_period_months"
+        ]
+      },
+      {
+        "name": "LogisticsCondition",
+        "category": "FACT",
+        "description": "Conditions commerciales (franco, paiement, etc.)",
+        "key_fields": [
+          "condition_name",
+          "threshold_amount",
+          "is_tacitly_renewable"
+        ]
+      },
+      {
+        "name": "DigitalMessage",
+        "category": "EVIDENCE",
+        "description": "WhatsApp / Email / SMS utilisés comme preuve",
+        "key_fields": [
+          "platform",
+          "sender",
+          "recipient",
+          "date"
+        ]
+      }
+    ]
+  },
+  "rules": {
+    "static": [
+      {
+        "rule_id": "L442-1-II",
+        "description": "Préavis proportionné à l'ancienneté",
+        "logic_payload": {
+          "if": {
+            ">": [
+              "seniority",
+              2
+            ],
+            "then": 6,
+            "else": 3
+          }
+        }
+      },
+      {
+        "rule_id": "MISCONDUCT_GRACE",
+        "description": "Faute grave autorise une rupture immédiate",
+        "logic_payload": {
+          "if": {
+            "and": [
+              {
+                ">=": [
+                  "fault_severity",
+                  8
+                ]
+              },
+              {
+                "==": [
+                  "fault_condoned",
+                  false
+                ]
+              }
+            ],
+            "then": "ALLOW_RUPTURE",
+            "else": "CHECK_NOTICE"
+          }
+        }
+      }
+    ],
+    "dynamic_templates": [
+      {
+        "rule_id": "interp_franco_tacite",
+        "description": "Franco tacite impose un préavis aligné sur la durée initiale",
+        "snippet": "def compute(condition):\\n    months = condition.get('initial_duration_months', 0)\\n    return max(months, 3)"
+      },
+      {
+        "rule_id": "interp_unilateral_drop",
+        "description": "Modification unilatérale = brutalité partielle",
+        "snippet": "def compute(severity):\\n    return min(1.0, 0.4 + 0.5 * severity)"
+      },
+      {
+        "rule_id": "interp_digital_written",
+        "description": "Messages digitaux assimilés à un écrit",
+        "snippet": "def compute(msg):\\n    return msg.get('platform') in ['WHATSAPP','EMAIL','SMS']"
+      },
+      {
+        "rule_id": "interp_competence_ny",
+        "description": "Clause compétence internationale déclenche re-planification",
+        "snippet": "def compute(text):\\n    return 'new york' in text.lower()"
+      }
+    ]
+  },
+  "planner": {
+    "tasks": [
+      {
+        "id": "t_check_prescription",
+        "action": "CHECK_LIMITATION_PERIOD",
+        "priority": 100,
+        "dependencies": [],
+        "description": "Defeater - prescription"
+      },
+      {
+        "id": "t_qualify_relationship",
+        "action": "QUALIFY_RELATIONSHIP",
+        "priority": 90,
+        "dependencies": [],
+        "description": "Qualifier la relation commerciale"
+      },
+      {
+        "id": "t_generate_interpretation",
+        "action": "GENERATE_INTERPRETATION",
+        "priority": 85,
+        "dependencies": [
+          "t_qualify_relationship"
+        ],
+        "description": "Injection des règles dynamiques"
+      },
+      {
+        "id": "t_apply_alexy",
+        "action": "APPLY_ALEXY_BALANCING",
+        "priority": 82,
+        "dependencies": [
+          "t_generate_interpretation"
+        ],
+        "description": "Calcul du préavis raisonnable"
+      },
+      {
+        "id": "t_calc_notice",
+        "action": "COMPUTE_NOTICE_GAP",
+        "priority": 80,
+        "dependencies": [
+          "t_apply_alexy"
+        ],
+        "description": "Comparer notice donné vs attendu"
+      },
+      {
+        "id": "t_check_fault",
+        "action": "VERIFY_GRAVE_FAULT",
+        "priority": 75,
+        "dependencies": [],
+        "description": "Vérifier les causes d'exonération"
+      }
+    ]
+  },
+  "interpretations": [
+    {
+      "key": "franco_tacite",
+      "rule_id": "interp_franco_tacite",
+      "label": "Interpretation : Franco reconduit",
+      "probability": 0.82,
+      "description": "Un franco tacite impose de respecter la durée contractuelle dans le préavis."
+    },
+    {
+      "key": "unilateral_modification",
+      "rule_id": "interp_unilateral_drop",
+      "label": "Interpretation : modification unilatérale",
+      "probability": 0.8,
+      "description": "Assimile les concessions imposées sans préavis à une rupture partielle."
+    },
+    {
+      "key": "digital_written",
+      "rule_id": "interp_digital_written",
+      "label": "Interpretation : Message digital = écrit",
+      "probability": 0.78,
+      "description": "Whatsapp/Email/SMS sont traités comme des notifications écrites."
+    },
+    {
+      "key": "clause_competence_ny",
+      "rule_id": "interp_competence_ny",
+      "label": "Clause de compétence New York",
+      "probability": 0.7,
+      "description": "Déclenche une re-planification pour vérifications de compétence."
+    }
+  ]
+}
