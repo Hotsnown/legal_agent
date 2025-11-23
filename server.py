@@ -104,7 +104,7 @@ async def get_case_events(case_id: str):
 async def reply_to_case(case_id: str, reply: UserReplyRequest) -> Dict[str, Any]:
     orchestrator = get_case_or_404(case_id)
     # Just record the reply, logic handles it in the next steps usually
-    orchestrator._publish_event("USER_REPLY", {"answer": reply.answer})
+    orchestrator.receive_interaction(reply.answer)
     return {"status": "received", "case_id": case_id}
 
 @app.get("/cases/{case_id}/graph")

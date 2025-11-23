@@ -61,6 +61,10 @@ class LegalOrchestrator:
         # CHANGED: Replaced Queue with a simple list for history
         self.execution_history: List[Dict[str, Any]] = [] 
         self.is_running: bool = False
+
+        # Événement pour mettre en pause l'exécution
+        self.user_input_event = asyncio.Event()
+        self.last_user_input: Optional[str] = None
         
         self.system_state = SystemState(case_id=case_id)
 
@@ -106,6 +110,13 @@ class LegalOrchestrator:
 
     def _get_pending_question(self):
         return getattr(self, "pending_question", "Question générique ?")
+
+    def receive_interaction(self, answer: str):
+        """Méthode appelée par l'API pour débloquer l'attente."""
+        print(f"   -> [ORCHESTRATOR] User input received: {answer}")
+        self.last_user_input = answer
+        self._publish_event("USER_REPLY", {"answer": answer})
+        self.user_input_event.set()  # Feu vert !
 
     # --- HELPERS DE PERSISTANCE ---
 
@@ -256,24 +267,53 @@ class LegalOrchestrator:
                 await asyncio.sleep(0.1)
 
                 if task.task_id == "t_ingest":
-                    log_update(task, "Scanning data directory...")
-                    await asyncio.sleep(0.2)
-                    self.perception.ingest_directory("data", state)
+                    log_update(task, "Démarrage de l'ingestion séquentielle...")
                     
-                    # Simulate progress updates
-                    updates = 3 if state.graph.nodes else 1
-                    for idx in range(updates):
-                        await asyncio.sleep(0.5)
-                        self._publish_event(
-                            EventType.GRAPH_UPDATE.value,
-                            {
-                                "task_id": task.task_id,
-                                "nodes": len(state.graph.nodes),
-                                "edges": len(state.graph.edges),
-                                "progress": round((idx + 1) / updates, 2),
-                            },
-                        )
-                    log_update(task, "Indexation complete. 15 Documents processed.")
+                    # 1. Lister les fichiers
+                    import os
+                    data_path = "data"
+                    if os.path.exists(data_path):
+                        files = sorted([f for f in os.listdir(data_path) if os.path.isfile(os.path.join(data_path, f))])
+                        
+                        # 2. Boucle d'ingestion "Cinématique"
+                        for i, filename in enumerate(files):
+                            filepath = os.path.join(data_path, filename)
+                            
+                            # Ingestion d'un seul document
+                            # (On lit le texte ici pour le passer à l'engine, ou on laisse l'engine le lire)
+                            with open(filepath, 'rb') as f: # Juste pour vérifier l'existence, l'engine relira
+                                pass
+                            
+                            # Appel de l'engine sur UN fichier
+                            text = self.perception._read_file_as_text(filepath)
+                            if text:
+                                self.perception.ingest_document(filename, text, state, source_path=filepath)
+                            
+                            # PAUSE DRAMATIQUE : On laisse le temps au front d'afficher le nouveau nœud
+                            await asyncio.sleep(0.8) 
+                            
+                            # Feedback visuel
+                            log_update(task, f"Document analysé : {filename}")
+                            
+                            # Emit graph update (pour que le front voie le graphe grandir)
+                            self._publish_event(
+                                EventType.GRAPH_UPDATE.value,
+                                {
+                                    "task_id": task.task_id,
+                                    "nodes_count": len(state.graph.nodes),
+                                    "last_node": list(state.graph.nodes.values())[-1].label if state.graph.nodes else ""
+                                }
+                            )
+
+                        # 3. Finalisation (Création des liens et des nœuds synthétiques)
+                        log_update(task, "Synthèse des relations et détection des anomalies...")
+                        await asyncio.sleep(1.0)
+                        self.perception.finalize_ingestion(state)
+                        
+                        self._publish_event(EventType.GRAPH_UPDATE.value, {"task_id": task.task_id, "note": "Structure initialisée"})
+                        
+                    else:
+                        log_update(task, "Aucun dossier data trouvé.")
 
                 elif task.task_id == "t_interpret":
                     log_update(task, "Analyzing clauses...")
@@ -311,70 +351,83 @@ class LegalOrchestrator:
                 elif task.task_id == "t_conflict":
                     log_update(task, "Cross-referencing facts...")
                     await asyncio.sleep(0.2)
+                    
+                    # ... (Logique de détection de conflit existante) ...
                     conflict_result = {}
                     simulate_fn = getattr(self.reasoner, "simulate_uncertainty_resolution", None)
                     if callable(simulate_fn):
                         conflict_result = simulate_fn(state) or {}
                     
-                    question = None
-                    if isinstance(conflict_result, dict):
-                        question = conflict_result.get("question")
-                    question = question or "Cette date a-t-elle été confirmée par e-mail ?"
+                    question = conflict_result.get("question", "Cette date a-t-elle été confirmée par e-mail ?")
                     
-                    self._publish_event(EventType.UNCERTAINTY_REQ.value, {"task_id": task.task_id, "question": question})
-                    await asyncio.sleep(2.0)
+                    # --- PATCH START : PAUSE RÉELLE ---
+                    # 1. On notifie le front-end qu'on attend une réponse
+                    self._publish_event(EventType.UNCERTAINTY_REQ.value, {
+                        "task_id": task.task_id, 
+                        "question": question,
+                        "status": "WAITING_FOR_INPUT" # Signal pour l'UI d'afficher les boutons
+                    })
                     
-                    user_artifact = {"type": "USER_REPLY", "content": "Oui, confirmé par email."}
-                    task.artifacts.append(user_artifact)
-                    self._publish_event(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "artifact": user_artifact})
-                    log_update(task, "New Evidence Injected. Probability updated.")
+                    log_update(task, "Uncertainty detected. Waiting for user input...")
+                    self.state_machine_status = WorkflowState.INTERACTING
                     
-                    evidence_node = GraphNode(
-                        node_id=f"evidence_{uuid.uuid4().hex[:8]}",
-                        type=NodeType.EVIDENCE,
-                        label="Email de confirmation",
-                        world_tag=WorldTag.SHARED,
-                        probability_score=0.78,
-                        content={"type": "email_confirmation", "answer": user_artifact["content"]},
-                    )
-                    state.graph.add_node(evidence_node)
-                    self._publish_event(
-                        EventType.GRAPH_UPDATE.value,
-                        {
+                    # 2. On reset l'événement et on attend (AWAIT)
+                    self.user_input_event.clear()
+                    await self.user_input_event.wait() # Le script s'arrête ICI jusqu'à l'appel API
+                    
+                    # 3. On reprend avec la vraie réponse
+                    answer = self.last_user_input or "No answer"
+                    user_artifact = {"type": "USER_REPLY", "content": answer}
+                    
+                    # Logique conditionnelle simple pour la démo (Scripting adaptatif)
+                    if "oui" in answer.lower() or "yes" in answer.lower():
+                        log_update(task, "User confirmed. Injecting evidence...")
+                        # ... (Création du nœud de preuve comme avant) ...
+                        evidence_node = GraphNode(
+                            node_id=f"evidence_{uuid.uuid4().hex[:8]}",
+                            type=NodeType.EVIDENCE,
+                            label="Email de confirmation (User)",
+                            world_tag=WorldTag.SHARED,
+                            probability_score=0.99, # Certitude forte
+                            content={"type": "email_confirmation", "answer": answer},
+                        )
+                        state.graph.add_node(evidence_node)
+                        self._publish_event(EventType.GRAPH_UPDATE.value, {
                             "task_id": task.task_id,
                             "node": evidence_node.model_dump(),
-                            "note": "Counter-evidence added, narrative B weakening",
-                        },
-                    )
+                            "note": "Narrative B collapsed by user input"
+                        })
+                    else:
+                        log_update(task, "User denied. Investigation continues...")
+                        # Ici on pourrait choisir de ne pas créer la preuve, changeant le verdict !
+                    
+                    task.artifacts.append(user_artifact)
+                    self.state_machine_status = WorkflowState.EXECUTING
 
                 elif task.task_id == "t_alexy":
-                    log_update(task, "Calculating reasonable notice...")
-                    await asyncio.sleep(0.2)
+                    log_update(task, "Calcul du préavis raisonnable (Méthode Alexy)...")
+                    
+                    # 1. Animation du calcul (les steps)
                     simulate_fn = getattr(self.reasoner, "simulate_alexy_steps", None)
                     steps = simulate_fn(state) if callable(simulate_fn) else []
-                    if not steps:
-                        steps = [
-                            {"label": "Base Tenure -> 18 months", "impact": 18.0, "total": 18.0},
-                            {"label": "Dependency uplift -> +2 months", "impact": 2.0, "total": 20.0},
-                            {"label": "Exclusivity uplift -> +4 months", "impact": 4.0, "total": 24.0},
-                        ]
-                    last_total = None
+                    
                     for step in steps:
-                        label = step.get("label", "Step")
-                        task.logs.append(label)
-                        self._publish_event(EventType.TASK_UPDATE.value, {"task_id": task.task_id, "log": label})
+                        # ... (votre code d'animation existant) ...
+                        await asyncio.sleep(1.2) # On prend le temps de lire
                         
-                        payload = dict(step)
-                        payload["task_id"] = task.task_id
-                        self._publish_event("WEIGHT_UPDATE", payload)
+                    # 2. CRISTALLISATION : On crée le Nœud Final dans le graphe
+                    # Cela connecte visuellement tous les arguments (Ancienneté, Dépendance) au Verdict
+                    if hasattr(self.reasoner, "apply_alexy_balancing"):
+                        final_notice = self.reasoner.apply_alexy_balancing(state)
                         
-                        last_total = step.get("total") or step.get("running_total")
-                        await asyncio.sleep(1.0)
-                    if last_total is not None:
-                        try:
-                            state.alexy_notice_months = float(last_total)
-                        except (TypeError, ValueError):
-                            pass
+                        # Notification au front pour afficher ce nouveau nœud crucial
+                        self._publish_event(
+                            EventType.GRAPH_UPDATE.value, 
+                            {
+                                "task_id": task.task_id, 
+                                "note": "Nœud de verdict généré"
+                            }
+                        )
 
                 elif task.task_id == "t_verdict":
                     fin = self._estimate_financials()

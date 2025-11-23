@@ -112,6 +112,14 @@ class RegexPerceptionEngine:
         self._finalize_relationship(state, source_doc_id=self._last_doc_id)
         self._inject_demo_nodes(state)
         self._synthesize_edges(state)
+    
+    def finalize_ingestion(self, state: SystemState):
+        """Méthode publique pour déclencher la synthèse à la fin du streaming."""
+        # On utilise le dernier doc ID mémorisé ou un par défaut
+        self._finalize_relationship(state, source_doc_id=self._last_doc_id)
+        self._inject_demo_nodes(state) # Les nœuds "dramatiques" (WhatsApp, Clause NY)
+        self._synthesize_edges(state)  # Les liens logiques
+        print("   -> [REGEX] Ingestion finalized.")
 
     def ingest_document(self, doc_name: str, full_text: str, state: SystemState, source_path: Optional[str] = None):
         print(f"--- [REGEX ENGINE] Processing {doc_name} ---")
